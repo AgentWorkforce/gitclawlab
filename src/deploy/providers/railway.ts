@@ -35,9 +35,73 @@ export async function checkRailwayStatus(): Promise<ProviderStatus> {
 
 /**
  * Deploy apps as services within the GitClawLab Railway project.
- * This works with a Project Token (no account token needed).
  * Each app becomes a separate service in the same project.
  */
+
+const RAILWAY_API_URL = 'https://backboard.railway.app/graphql/v2';
+
+/**
+ * Create a service in Railway via API
+ */
+async function createService(
+  projectId: string,
+  serviceName: string,
+  logs: string[]
+): Promise<{ success: boolean; serviceId?: string; error?: string }> {
+  const token = process.env.RAILWAY_API_TOKEN || process.env.RAILWAY_TOKEN;
+  if (!token) {
+    return { success: false, error: 'No Railway token available' };
+  }
+
+  logs.push(`Creating service: ${serviceName}`);
+
+  try {
+    const response = await fetch(RAILWAY_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        query: `
+          mutation ServiceCreate($input: ServiceCreateInput!) {
+            serviceCreate(input: $input) {
+              id
+              name
+            }
+          }
+        `,
+        variables: {
+          input: {
+            projectId,
+            name: serviceName,
+          },
+        },
+      }),
+    });
+
+    const data = await response.json() as any;
+
+    if (data.errors) {
+      const errorMsg = data.errors[0]?.message || 'Unknown API error';
+      logs.push(`Service creation error: ${errorMsg}`);
+      // If service already exists, that's okay
+      if (errorMsg.includes('already exists') || errorMsg.includes('duplicate')) {
+        logs.push('Service already exists, continuing...');
+        return { success: true };
+      }
+      return { success: false, error: errorMsg };
+    }
+
+    const serviceId = data.data?.serviceCreate?.id;
+    logs.push(`Service created: ${serviceId}`);
+    return { success: true, serviceId };
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    logs.push(`Failed to create service: ${errorMsg}`);
+    return { success: false, error: errorMsg };
+  }
+}
 
 
 /**
@@ -69,8 +133,26 @@ export async function deployToRailway(options: DeployOptions): Promise<DeployRes
 
   logs.push(`Railway CLI version: ${status.version}`);
 
-  // Deploy as a new service within the GitClawLab project
-  // This works with Project Token - no account token needed
+  // Get project ID from environment
+  const projectId = process.env.RAILWAY_PROJECT_ID;
+  if (!projectId) {
+    return {
+      success: false,
+      error: 'RAILWAY_PROJECT_ID not set',
+      logs: [...logs, 'ERROR: RAILWAY_PROJECT_ID not set'],
+    };
+  }
+
+  // Create service via API first (CLI can't create services)
+  const serviceResult = await createService(projectId, appName, logs);
+  if (!serviceResult.success) {
+    return {
+      success: false,
+      error: serviceResult.error || 'Failed to create service',
+      logs,
+    };
+  }
+
   logs.push(`Deploying as service: ${appName}`);
 
   // Set environment variables for the service
@@ -109,7 +191,6 @@ export async function deployToRailway(options: DeployOptions): Promise<DeployRes
     }
 
     // Build command args - need project ID to deploy to the right project
-    const projectId = process.env.RAILWAY_PROJECT_ID;
     const envId = process.env.RAILWAY_ENVIRONMENT_ID;
 
     const args = ['up', '--detach', '--service', appName];
