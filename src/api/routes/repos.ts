@@ -123,10 +123,11 @@ router.get('/:name', optionalAuthMiddleware, (req: AuthenticatedRequest, res: Re
 });
 
 /**
- * DELETE /api/repos/:name - Delete repository
+ * DELETE /api/repos/:name - Delete repository and undeploy from Railway
  */
-router.delete('/:name', authMiddleware, (req: AuthenticatedRequest, res: Response) => {
+router.delete('/:name', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   const { name } = req.params;
+  const { undeploy } = req.query; // ?undeploy=true to also remove Railway service
 
   try {
     const repo = getRepository(name);
@@ -141,6 +142,42 @@ router.delete('/:name', authMiddleware, (req: AuthenticatedRequest, res: Respons
       return;
     }
 
+    // Undeploy from Railway if requested
+    let undeployResult = null;
+    if (undeploy === 'true') {
+      try {
+        const projectId = process.env.RAILWAY_PROJECT_ID;
+        const token = process.env.RAILWAY_API_TOKEN || process.env.RAILWAY_TOKEN;
+
+        if (projectId && token) {
+          // Delete the Railway service via API
+          const response = await fetch('https://backboard.railway.app/graphql/v2', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+              query: `
+                mutation ServiceDelete($id: String!, $projectId: String!) {
+                  serviceDelete(id: $id, projectId: $projectId)
+                }
+              `,
+              variables: {
+                id: name, // Service name
+                projectId,
+              },
+            }),
+          });
+
+          const data = await response.json() as any;
+          undeployResult = data.errors ? { error: data.errors[0]?.message } : { success: true };
+        }
+      } catch (err) {
+        undeployResult = { error: err instanceof Error ? err.message : 'Undeploy failed' };
+      }
+    }
+
     const db = getDb();
 
     // Delete related records first
@@ -149,7 +186,11 @@ router.delete('/:name', authMiddleware, (req: AuthenticatedRequest, res: Respons
     db.prepare('DELETE FROM deployments WHERE repo_id = ?').run(repo.id);
     db.prepare('DELETE FROM repositories WHERE id = ?').run(repo.id);
 
-    res.status(204).send();
+    res.status(200).json({
+      deleted: true,
+      repository: name,
+      undeploy: undeployResult
+    });
   } catch (error) {
     res.status(500).json({ error: 'Failed to delete repository' });
   }
