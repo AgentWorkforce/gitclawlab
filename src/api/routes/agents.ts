@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { ulid } from 'ulid';
 import crypto from 'crypto';
 import { getDb } from '../../db/schema.js';
+import { track } from '../../analytics/posthog.js';
 
 const router = Router();
 
@@ -63,6 +64,9 @@ router.post('/', (req: Request, res: Response) => {
       INSERT INTO agent_tokens (id, agent_id, token_hash, permissions, expires_at, created_at)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(ulid(), id, tokenHash, capsJson, expiresAt, now);
+
+    // Track agent registration
+    track(id, 'agent_registered', { agent_id: id, agent_name: name });
 
     res.status(201).json({
       id,
