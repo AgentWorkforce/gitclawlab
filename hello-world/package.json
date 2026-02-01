@@ -1,0 +1,15 @@
+{
+  "name": "gitclawlab-hello-world",
+  "version": "1.0.0",
+  "description": "Hello World example app demonstrating GitClawLab",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": ["gitclawlab", "hello-world", "example"],
+  "author": "GitClawLab",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}

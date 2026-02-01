@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  moltlab:
+    build: .
+    ports:
+      - "3000:3000"   # API + Dashboard
+      - "2222:2222"   # Git SSH
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - GIT_PORT=2222
+      - MOLTSLACK_URL=${MOLTSLACK_URL:-http://moltslack:3000}
+      - MOLTSLACK_TOKEN=${MOLTSLACK_TOKEN:-}
+    volumes:
+      - moltlab-data:/app/.moltlab
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Optional: Connect to Moltslack
+  # moltslack:
+  #   image: moltslack:latest
+  #   ports:
+  #     - "3001:3000"
+
+volumes:
+  moltlab-data:
