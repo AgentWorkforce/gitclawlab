@@ -37,3 +37,10 @@ coverage/
 *.temp
 
 .npm-cache
+
+# Database files
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+gitclaw.db

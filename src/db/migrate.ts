@@ -80,15 +80,23 @@ export async function runMigrations(adapter: DatabaseAdapter): Promise<{ applied
     const migrationsDir = join(__dirname, 'migrations');
     const sql = await readFile(join(migrationsDir, migration), 'utf-8');
 
-    // Split SQL into individual statements and run them
-    // This handles multi-statement migrations
-    const statements = sql
-      .split(';')
-      .map(s => s.trim())
-      .filter(s => s.length > 0 && !s.startsWith('--'));
+    // For PostgreSQL, run the entire migration as a single transaction
+    // For SQLite, split into statements (it handles this better)
+    try {
+      await adapter.exec(sql);
+    } catch (error: any) {
+      // If running full SQL fails, try splitting into statements
+      console.log('Running migration statements individually...');
+      const statements = sql
+        .split(';')
+        .map(s => s.trim())
+        .filter(s => s.length > 0 && !s.startsWith('--'));
 
-    for (const statement of statements) {
-      await adapter.exec(statement);
+      for (const statement of statements) {
+        if (statement.length > 0) {
+          await adapter.exec(statement);
+        }
+      }
     }
 
     await recordMigration(adapter, migration);
