@@ -1,12 +1,18 @@
+import { useState, useEffect } from 'react'
 import { Routes, Route, Link } from 'react-router-dom'
 import RepoList from './components/RepoList'
 import DeploymentStatus from './components/DeploymentStatus'
+import Billing from './components/Billing'
 
 const styles = {
   container: {
     maxWidth: '1200px',
     margin: '0 auto',
-    padding: '20px'
+    padding: '20px',
+    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+    background: '#0d1117',
+    minHeight: '100vh',
+    color: '#c9d1d9'
   },
   header: {
     display: 'flex',
@@ -45,6 +51,7 @@ function App() {
         <nav style={styles.nav}>
           <Link to="/" style={styles.navLink}>Repositories</Link>
           <Link to="/deployments" style={styles.navLink}>Deployments</Link>
+          <Link to="/billing" style={styles.navLink}>Billing</Link>
         </nav>
       </header>
 
@@ -52,6 +59,7 @@ function App() {
         <Route path="/" element={<RepoList />} />
         <Route path="/repo/:owner/:name" element={<RepoDetail />} />
         <Route path="/deployments" element={<DeploymentStatus />} />
+        <Route path="/billing" element={<Billing />} />
       </Routes>
     </div>
   )
@@ -70,7 +78,7 @@ function RepoDetail() {
     fetch(`/api/repos/${owner}/${name}`)
       .then(res => res.json())
       .then(setRepo)
-      .catch(err => setMessage('Failed to load repository'))
+      .catch(() => setMessage('Failed to load repository'))
   }, [owner, name])
 
   const triggerDeploy = async () => {
@@ -86,7 +94,7 @@ function RepoDetail() {
       } else {
         setMessage(`Error: ${data.error}`)
       }
-    } catch (err) {
+    } catch {
       setMessage('Failed to trigger deployment')
     }
     setDeploying(false)
@@ -133,8 +141,6 @@ function RepoDetail() {
     </div>
   )
 }
-
-import { useState, useEffect } from 'react'
 
 const detailStyles = {
   header: {
