@@ -28,99 +28,11 @@ export async function checkRailwayStatus(): Promise<ProviderStatus> {
 }
 
 /**
- * Create a new Railway project and link to it
- * Uses `railway init` which creates and links in one step
+ * Deploy apps as services within the GitClawLab Railway project.
+ * This works with a Project Token (no account token needed).
+ * Each app becomes a separate service in the same project.
  */
-async function createProject(
-  appName: string,
-  repoPath: string,
-  logs: string[]
-): Promise<{ success: boolean; projectId?: string; error?: string }> {
-  try {
-    // railway init creates a new project and links to it
-    const { stdout, stderr } = await execa('railway', ['init', '--name', appName], {
-      cwd: repoPath,
-      timeout: 30000,
-      env: {
-        ...process.env,
-        // Ensure non-interactive mode
-        CI: 'true',
-      },
-    });
 
-    logs.push(`Railway init output: ${stdout}`);
-    if (stderr) logs.push(`Railway init stderr: ${stderr}`);
-
-    // Extract project ID from output
-    const projectIdMatch = stdout.match(/Project ID: ([a-f0-9-]+)/i) ||
-                          stdout.match(/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i);
-    return {
-      success: true,
-      projectId: projectIdMatch?.[1],
-    };
-  } catch (error: any) {
-    const errorMsg = error.stderr || error.message || 'Failed to create Railway project';
-    logs.push(`Railway init error: ${errorMsg}`);
-    return {
-      success: false,
-      error: errorMsg,
-    };
-  }
-}
-
-/**
- * Ensure a Railway project exists for deployment
- * Creates a new project if needed (each app gets its own Railway project)
- */
-async function ensureProject(
-  appName: string,
-  repoPath: string,
-  logs: string[]
-): Promise<{ success: boolean; projectId?: string; error?: string }> {
-  logs.push(`Setting up Railway project for: ${appName}`);
-
-  // Check if Railway token is set for authentication
-  // RAILWAY_API_TOKEN (account/team token) is needed to create new projects
-  // RAILWAY_TOKEN (project token) only works for a single project
-  if (!process.env.RAILWAY_API_TOKEN && !process.env.RAILWAY_TOKEN) {
-    logs.push('Warning: No Railway token set - using local credentials');
-  } else if (process.env.RAILWAY_API_TOKEN) {
-    logs.push('Using RAILWAY_API_TOKEN for authentication');
-  } else {
-    logs.push('Using RAILWAY_TOKEN (project-scoped) for authentication');
-  }
-
-  // Always create a new project for each app
-  // This ensures each deployed app has its own isolated Railway project
-  const result = await createProject(appName, repoPath, logs);
-
-  if (result.success) {
-    logs.push(`Railway project ready: ${result.projectId || appName}`);
-  }
-
-  return result;
-}
-
-/**
- * Set environment variables on Railway
- */
-async function setEnvironmentVariables(
-  env: Record<string, string>,
-  repoPath: string,
-  logs: string[]
-): Promise<void> {
-  for (const [key, value] of Object.entries(env)) {
-    try {
-      await execa('railway', ['variables', 'set', `${key}=${value}`], {
-        cwd: repoPath,
-        timeout: 10000,
-      });
-      logs.push(`Set env var: ${key}`);
-    } catch (error) {
-      logs.push(`Warning: Failed to set env var ${key}`);
-    }
-  }
-}
 
 /**
  * Deploy to Railway
@@ -151,29 +63,36 @@ export async function deployToRailway(options: DeployOptions): Promise<DeployRes
 
   logs.push(`Railway CLI version: ${status.version}`);
 
-  // Ensure project exists
-  const projectResult = await ensureProject(appName, repoPath, logs);
-  if (!projectResult.success) {
-    return {
-      success: false,
-      error: projectResult.error,
-      logs,
-    };
-  }
+  // Deploy as a new service within the GitClawLab project
+  // This works with Project Token - no account token needed
+  logs.push(`Deploying as service: ${appName}`);
 
-  // Set environment variables
+  // Set environment variables for the service
   if (Object.keys(env).length > 0) {
     logs.push('Setting environment variables...');
-    await setEnvironmentVariables(env, repoPath, logs);
+    for (const [key, value] of Object.entries(env)) {
+      try {
+        await execa('railway', ['variables', 'set', `${key}=${value}`, '--service', appName], {
+          cwd: repoPath,
+          timeout: 10000,
+          env: { ...process.env, CI: 'true' },
+        });
+        logs.push(`Set env var: ${key}`);
+      } catch {
+        logs.push(`Warning: Failed to set env var ${key}`);
+      }
+    }
   }
 
-  // Deploy using Railway's built-in Nixpacks or Dockerfile
+  // Deploy using --service flag to create/update the service
   logs.push('Deploying to Railway...');
 
   try {
-    const deployProcess = execa('railway', ['up', '--detach'], {
+    // Use --service flag to deploy as a named service
+    const deployProcess = execa('railway', ['up', '--detach', '--service', appName], {
       cwd: repoPath,
       timeout: 600000, // 10 minute timeout
+      env: { ...process.env, CI: 'true' },
     });
 
     deployProcess.stdout?.on('data', (data) => {
