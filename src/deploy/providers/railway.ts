@@ -15,7 +15,13 @@ export async function checkRailwayStatus(): Promise<ProviderStatus> {
     const { stdout: versionOutput } = await execa('railway', ['--version']);
     const version = versionOutput.trim();
 
-    // Check if authenticated
+    // Check for token-based auth first (CI/CD mode)
+    // Project tokens don't work with `railway whoami`
+    if (process.env.RAILWAY_TOKEN || process.env.RAILWAY_API_TOKEN) {
+      return { installed: true, authenticated: true, version };
+    }
+
+    // Fall back to checking interactive login
     try {
       await execa('railway', ['whoami'], { timeout: 10000 });
       return { installed: true, authenticated: true, version };
