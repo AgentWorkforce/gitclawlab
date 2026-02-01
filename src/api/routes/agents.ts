@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { ulid } from 'ulid';
 import crypto from 'crypto';
-import { getDb } from '../../db/schema.js';
+import { dbQuery, dbQueryOne, dbExecute, createAgentToken } from '../../db/schema.js';
 
 const router = Router();
 
@@ -13,7 +13,7 @@ interface Agent {
 }
 
 // POST /api/agents - Register a new agent (requires admin authentication)
-router.post('/', (req: Request, res: Response) => {
+router.post('/', async (req: Request, res: Response) => {
   try {
     // Require admin API key for agent registration
     const adminKey = req.headers['x-admin-key'];
@@ -34,35 +34,21 @@ router.post('/', (req: Request, res: Response) => {
       return;
     }
 
-    const db = getDb();
     const id = `agent-${ulid()}`;
     const token = `gcl_${crypto.randomBytes(32).toString('hex')}`;
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
     const now = new Date().toISOString();
     const capsJson = JSON.stringify(capabilities || ['repos']);
 
-    // Ensure agents table exists
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS agents (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        capabilities TEXT NOT NULL,
-        created_at TEXT NOT NULL
-      )
-    `);
-
     // Insert agent
-    db.prepare(`
-      INSERT INTO agents (id, name, capabilities, created_at)
-      VALUES (?, ?, ?, ?)
-    `).run(id, name, capsJson, now);
+    await dbExecute(
+      `INSERT INTO agents (id, name, capabilities, created_at) VALUES (?, ?, ?, ?)`,
+      [id, name, capsJson, now]
+    );
 
     // Store token hash
-    const expiresAt = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(); // 1 year
-    db.prepare(`
-      INSERT INTO agent_tokens (id, agent_id, token_hash, permissions, expires_at, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(ulid(), id, tokenHash, capsJson, expiresAt, now);
+    const expiresAt = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000); // 1 year
+    await createAgentToken(id, tokenHash, capabilities || ['repos'], expiresAt);
 
     res.status(201).json({
       id,
@@ -78,10 +64,9 @@ router.post('/', (req: Request, res: Response) => {
 });
 
 // GET /api/agents/:id - Get agent info (without token)
-router.get('/:id', (req: Request, res: Response) => {
+router.get('/:id', async (req: Request, res: Response) => {
   try {
-    const db = getDb();
-    const agent = db.prepare(`SELECT * FROM agents WHERE id = ?`).get(req.params.id) as Agent | undefined;
+    const agent = await dbQueryOne<Agent>(`SELECT * FROM agents WHERE id = ?`, [req.params.id]);
 
     if (!agent) {
       res.status(404).json({ error: 'Agent not found' });

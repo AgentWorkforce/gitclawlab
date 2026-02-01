@@ -4,7 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { execa } from 'execa';
 import YAML from 'yaml';
-import { createDeployment, getRepository, getDb, updateDeployment } from '../db/schema.js';
+import { createDeployment, getRepository, updateDeployment, updateRepositoryByName } from '../db/schema.js';
 import { notifyPush, notifyBuildError } from '../moltslack/notifications.js';
 import { deploy, type DeployProvider } from '../deploy/engine.js';
 import type { MoltlabConfig } from '../deploy/types.js';
@@ -46,8 +46,7 @@ export async function handlePostReceive(repoPath: string, updates: ReceiveUpdate
   const now = new Date().toISOString();
 
   try {
-    const db = getDb();
-    db.prepare('UPDATE repositories SET last_push_at = ?, updated_at = ? WHERE name = ?').run(now, now, repoName);
+    await updateRepositoryByName(repoName, { last_push_at: now, updated_at: now });
   } catch (err) {
     console.warn(`moltlab: could not update push timestamp for ${repoName}`, err);
   }
@@ -70,7 +69,7 @@ export async function handlePostReceive(repoPath: string, updates: ReceiveUpdate
 
     let repo;
     try {
-      repo = getRepository(repoName);
+      repo = await getRepository(repoName);
     } catch (err) {
       console.warn(`moltlab: database unavailable while handling push for ${repoName}`, err);
       continue;
@@ -83,18 +82,18 @@ export async function handlePostReceive(repoPath: string, updates: ReceiveUpdate
     const targetRaw = config.deploy?.target || 'railway';
     const target: DeployProvider = targetRaw === 'fly' ? 'fly' : 'railway';
     try {
-      const deployment = createDeployment(repo.id, update.newRevision, target, 'git-hook');
+      const deployment = await createDeployment(repo.id, update.newRevision, target, 'git-hook');
       console.log(`[deploy] queued ${repoName}@${update.newRevision.slice(0, 7)} (${branch}) to ${deployment.target}`);
 
       // Materialize the pushed commit into a temp worktree so the deploy engine can build it
       const { workdir, cleanup } = await materializeRevision(repoPath, update.newRevision);
 
       // Mark deployment as building
-      updateDeployment(deployment.id, { status: 'building' });
+      await updateDeployment(deployment.id, { status: 'building' });
 
       try {
         // Kick off deployment (build + Railway CLI) from the checked-out tree
-        updateDeployment(deployment.id, { status: 'deploying' });
+        await updateDeployment(deployment.id, { status: 'deploying' });
         const result = await deploy({
           repoPath: workdir,
           commitSha: update.newRevision,
@@ -103,7 +102,7 @@ export async function handlePostReceive(repoPath: string, updates: ReceiveUpdate
           env: config.deploy?.env,
         });
 
-        updateDeployment(deployment.id, {
+        await updateDeployment(deployment.id, {
           status: result.success ? 'success' : 'failed',
           url: result.url ?? null,
           logs: result.logs.join('\n'),
@@ -111,7 +110,7 @@ export async function handlePostReceive(repoPath: string, updates: ReceiveUpdate
         });
       } catch (deployErr) {
         const message = deployErr instanceof Error ? deployErr.message : String(deployErr);
-        updateDeployment(deployment.id, {
+        await updateDeployment(deployment.id, {
           status: 'failed',
           logs: `${message}\n`,
           completed_at: new Date().toISOString(),

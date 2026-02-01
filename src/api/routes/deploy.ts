@@ -5,6 +5,7 @@ import {
   updateDeployment,
   listDeployments,
   getRepository,
+  canDeploy,
 } from '../../db/schema.js';
 import {
   authMiddleware,
@@ -32,22 +33,33 @@ router.post('/repos/:name/deploy', authMiddleware, async (req: AuthenticatedRequ
   }
 
   try {
-    const repo = getRepository(name);
+    const repo = await getRepository(name);
     if (!repo) {
       res.status(404).json({ error: 'Repository not found' });
       return;
     }
 
     // Need write access to deploy
-    if (!hasRepoAccess(req.agentId, repo.id, 'write')) {
+    if (!(await hasRepoAccess(req.agentId, repo.id, 'write'))) {
       res.status(403).json({ error: 'Permission denied' });
+      return;
+    }
+
+    // Check deployment limits based on plan
+    const deployCheck = await canDeploy(req.agentId!);
+    if (!deployCheck.allowed) {
+      res.status(429).json({
+        error: 'Deployment limit exceeded',
+        message: deployCheck.reason,
+        upgrade_url: '/app/billing',
+      });
       return;
     }
 
     // Use provided commit or default to HEAD
     const sha = commit_sha || 'HEAD';
 
-    const deployment = createDeployment(repo.id, sha, target, req.agentId!);
+    const deployment = await createDeployment(repo.id, sha, target, req.agentId!);
 
     // In a real implementation, this would trigger the actual deployment
     // For now, we just create the deployment record
@@ -62,11 +74,11 @@ router.post('/repos/:name/deploy', authMiddleware, async (req: AuthenticatedRequ
 /**
  * GET /api/deployments - List all deployments
  */
-router.get('/deployments', optionalAuthMiddleware, (req: AuthenticatedRequest, res: Response) => {
+router.get('/deployments', optionalAuthMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   const { repo_id, status, limit = '50' } = req.query;
 
   try {
-    let deployments = listDeployments(repo_id as string | undefined);
+    let deployments = await listDeployments(repo_id as string | undefined);
 
     // Filter by status if provided
     if (status) {
@@ -86,25 +98,25 @@ router.get('/deployments', optionalAuthMiddleware, (req: AuthenticatedRequest, r
 /**
  * GET /api/deployments/:id - Get deployment status
  */
-router.get('/deployments/:id', optionalAuthMiddleware, (req: AuthenticatedRequest, res: Response) => {
+router.get('/deployments/:id', optionalAuthMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   const { id } = req.params;
 
   try {
-    const deployment = getDeployment(id);
+    const deployment = await getDeployment(id);
     if (!deployment) {
       res.status(404).json({ error: 'Deployment not found' });
       return;
     }
 
     // Check if user can view this deployment (via repo access)
-    const repo = getRepository(deployment.repo_id);
+    const repo = await getRepository(deployment.repo_id);
     // If repo doesn't exist (orphaned deployment), treat as private
     if (!repo) {
       res.status(404).json({ error: 'Deployment not found' });
       return;
     }
 
-    if (repo.is_private && !hasRepoAccess(req.agentId, repo.id, 'read')) {
+    if (repo.is_private && !(await hasRepoAccess(req.agentId, repo.id, 'read'))) {
       res.status(404).json({ error: 'Deployment not found' });
       return;
     }
@@ -118,18 +130,18 @@ router.get('/deployments/:id', optionalAuthMiddleware, (req: AuthenticatedReques
 /**
  * POST /api/deployments/:id/cancel - Cancel a pending/running deployment
  */
-router.post('/deployments/:id/cancel', authMiddleware, (req: AuthenticatedRequest, res: Response) => {
+router.post('/deployments/:id/cancel', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   const { id } = req.params;
 
   try {
-    const deployment = getDeployment(id);
+    const deployment = await getDeployment(id);
     if (!deployment) {
       res.status(404).json({ error: 'Deployment not found' });
       return;
     }
 
     // Check write access
-    if (!hasRepoAccess(req.agentId, deployment.repo_id, 'write')) {
+    if (!(await hasRepoAccess(req.agentId, deployment.repo_id, 'write'))) {
       res.status(403).json({ error: 'Permission denied' });
       return;
     }
@@ -140,7 +152,7 @@ router.post('/deployments/:id/cancel', authMiddleware, (req: AuthenticatedReques
       return;
     }
 
-    const updated = updateDeployment(id, {
+    const updated = await updateDeployment(id, {
       status: 'failed',
       logs: (deployment.logs || '') + '\n[CANCELLED] Deployment cancelled by user',
       completed_at: new Date().toISOString(),
@@ -159,14 +171,14 @@ router.post('/deployments/:id/retry', authMiddleware, async (req: AuthenticatedR
   const { id } = req.params;
 
   try {
-    const deployment = getDeployment(id);
+    const deployment = await getDeployment(id);
     if (!deployment) {
       res.status(404).json({ error: 'Deployment not found' });
       return;
     }
 
     // Check write access
-    if (!hasRepoAccess(req.agentId, deployment.repo_id, 'write')) {
+    if (!(await hasRepoAccess(req.agentId, deployment.repo_id, 'write'))) {
       res.status(403).json({ error: 'Permission denied' });
       return;
     }
@@ -178,7 +190,7 @@ router.post('/deployments/:id/retry', authMiddleware, async (req: AuthenticatedR
     }
 
     // Create a new deployment with the same parameters
-    const newDeployment = createDeployment(
+    const newDeployment = await createDeployment(
       deployment.repo_id,
       deployment.commit_sha,
       deployment.target,
@@ -194,25 +206,25 @@ router.post('/deployments/:id/retry', authMiddleware, async (req: AuthenticatedR
 /**
  * GET /api/deployments/:id/logs - Stream deployment logs
  */
-router.get('/deployments/:id/logs', optionalAuthMiddleware, (req: AuthenticatedRequest, res: Response) => {
+router.get('/deployments/:id/logs', optionalAuthMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   const { id } = req.params;
 
   try {
-    const deployment = getDeployment(id);
+    const deployment = await getDeployment(id);
     if (!deployment) {
       res.status(404).json({ error: 'Deployment not found' });
       return;
     }
 
     // Check read access
-    const repo = getRepository(deployment.repo_id);
+    const repo = await getRepository(deployment.repo_id);
     // If repo doesn't exist (orphaned deployment), treat as private
     if (!repo) {
       res.status(404).json({ error: 'Deployment not found' });
       return;
     }
 
-    if (repo.is_private && !hasRepoAccess(req.agentId, repo.id, 'read')) {
+    if (repo.is_private && !(await hasRepoAccess(req.agentId, repo.id, 'read'))) {
       res.status(404).json({ error: 'Deployment not found' });
       return;
     }
@@ -231,19 +243,19 @@ router.get('/deployments/:id/logs', optionalAuthMiddleware, (req: AuthenticatedR
  * Internal endpoint to update deployment status (used by deployment workers)
  * PATCH /api/deployments/:id (internal use)
  */
-router.patch('/deployments/:id', authMiddleware, (req: AuthenticatedRequest, res: Response) => {
+router.patch('/deployments/:id', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   const { id } = req.params;
   const { status, url, subdomain, logs, completed_at } = req.body;
 
   try {
-    const deployment = getDeployment(id);
+    const deployment = await getDeployment(id);
     if (!deployment) {
       res.status(404).json({ error: 'Deployment not found' });
       return;
     }
 
     // Check admin access (for internal updates)
-    if (!hasRepoAccess(req.agentId, deployment.repo_id, 'admin')) {
+    if (!(await hasRepoAccess(req.agentId, deployment.repo_id, 'admin'))) {
       res.status(403).json({ error: 'Permission denied' });
       return;
     }
@@ -255,7 +267,7 @@ router.patch('/deployments/:id', authMiddleware, (req: AuthenticatedRequest, res
     if (logs !== undefined) updates.logs = logs;
     if (completed_at !== undefined) updates.completed_at = completed_at;
 
-    const updated = updateDeployment(id, updates);
+    const updated = await updateDeployment(id, updates);
     res.json(updated);
   } catch (error) {
     res.status(500).json({ error: 'Failed to update deployment' });

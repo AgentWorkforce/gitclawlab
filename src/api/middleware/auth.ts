@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { getDb } from '../../db/schema.js';
+import { getAgentToken, getAgent, createAgentToken, checkRepoAccess } from '../../db/schema.js';
 import crypto from 'crypto';
 
 export interface AuthenticatedRequest extends Request {
@@ -8,82 +8,121 @@ export interface AuthenticatedRequest extends Request {
 }
 
 /**
- * Middleware to authenticate requests using agent tokens
- * Token should be passed in Authorization header as: Bearer <token>
+ * Middleware to authenticate requests using agent tokens or X-Agent-ID header
+ *
+ * Auth methods (in order of precedence):
+ * 1. Authorization: Bearer <token> - Full token-based auth with permissions
+ * 2. X-Agent-ID: <agent-id> - Simple agent identification (for agent-to-agent calls)
  */
-export function authMiddleware(
+export async function authMiddleware(
   req: AuthenticatedRequest,
   res: Response,
   next: NextFunction
-): void {
+): Promise<void> {
   const authHeader = req.headers.authorization;
+  const agentIdHeader = req.headers['x-agent-id'] as string | undefined;
 
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    res.status(401).json({ error: 'Missing or invalid authorization header' });
-    return;
-  }
+  // Try Bearer token first
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.slice(7);
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
 
-  const token = authHeader.slice(7);
-  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    try {
+      const tokenRecord = await getAgentToken(tokenHash);
 
-  try {
-    const db = getDb();
-    const tokenRecord = db.prepare(`
-      SELECT agent_id, permissions, expires_at
-      FROM agent_tokens
-      WHERE token_hash = ?
-    `).get(tokenHash) as { agent_id: string; permissions: string; expires_at: string } | undefined;
+      if (!tokenRecord) {
+        res.status(401).json({ error: 'Invalid token' });
+        return;
+      }
 
-    if (!tokenRecord) {
-      res.status(401).json({ error: 'Invalid token' });
+      if (new Date(tokenRecord.expires_at) < new Date()) {
+        res.status(401).json({ error: 'Token expired' });
+        return;
+      }
+
+      req.agentId = tokenRecord.agent_id;
+      req.permissions = JSON.parse(tokenRecord.permissions);
+      next();
+      return;
+    } catch (error) {
+      res.status(500).json({ error: 'Authentication failed' });
       return;
     }
+  }
 
-    if (new Date(tokenRecord.expires_at) < new Date()) {
-      res.status(401).json({ error: 'Token expired' });
+  // Fall back to X-Agent-ID header (simpler auth for agent-to-agent calls)
+  if (agentIdHeader) {
+    try {
+      // Check if this agent exists in the agents table
+      const agent = await getAgent(agentIdHeader);
+
+      if (agent) {
+        req.agentId = agent.id;
+        req.permissions = JSON.parse(agent.capabilities);
+        next();
+        return;
+      }
+
+      // For unregistered agents, allow basic access with the header value as ID
+      // This enables new agents to interact before full registration
+      req.agentId = agentIdHeader;
+      req.permissions = ['repos']; // Default minimal permissions
+      next();
+      return;
+    } catch (error) {
+      res.status(500).json({ error: 'Authentication failed' });
       return;
     }
-
-    req.agentId = tokenRecord.agent_id;
-    req.permissions = JSON.parse(tokenRecord.permissions);
-    next();
-  } catch (error) {
-    res.status(500).json({ error: 'Authentication failed' });
   }
+
+  res.status(401).json({ error: 'Missing or invalid authorization. Use Bearer token or X-Agent-ID header.' });
 }
 
 /**
  * Optional auth middleware - allows unauthenticated requests but attaches agent info if present
  */
-export function optionalAuthMiddleware(
+export async function optionalAuthMiddleware(
   req: AuthenticatedRequest,
   res: Response,
   next: NextFunction
-): void {
+): Promise<void> {
   const authHeader = req.headers.authorization;
+  const agentIdHeader = req.headers['x-agent-id'] as string | undefined;
 
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+  // Try Bearer token first
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.slice(7);
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+
+    try {
+      const tokenRecord = await getAgentToken(tokenHash);
+
+      if (tokenRecord && new Date(tokenRecord.expires_at) >= new Date()) {
+        req.agentId = tokenRecord.agent_id;
+        req.permissions = JSON.parse(tokenRecord.permissions);
+      }
+    } catch {
+      // Ignore errors for optional auth
+    }
     next();
     return;
   }
 
-  const token = authHeader.slice(7);
-  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  // Try X-Agent-ID header
+  if (agentIdHeader) {
+    try {
+      const agent = await getAgent(agentIdHeader);
 
-  try {
-    const db = getDb();
-    const tokenRecord = db.prepare(`
-      SELECT agent_id, permissions, expires_at
-      FROM agent_tokens
-      WHERE token_hash = ?
-    `).get(tokenHash) as { agent_id: string; permissions: string; expires_at: string } | undefined;
-
-    if (tokenRecord && new Date(tokenRecord.expires_at) >= new Date()) {
-      req.agentId = tokenRecord.agent_id;
-      req.permissions = JSON.parse(tokenRecord.permissions);
+      if (agent) {
+        req.agentId = agent.id;
+        req.permissions = JSON.parse(agent.capabilities);
+      } else {
+        req.agentId = agentIdHeader;
+        req.permissions = ['repos'];
+      }
+    } catch {
+      // Ignore errors for optional auth
     }
-  } catch {
-    // Ignore errors for optional auth
   }
 
   next();
@@ -91,12 +130,33 @@ export function optionalAuthMiddleware(
 
 /**
  * Check if agent has permission to access a repository
+ * This is now an async function that wraps the schema function
  */
-export function hasRepoAccess(
+export async function hasRepoAccess(
+  agentId: string | undefined,
+  repoId: string,
+  requiredPermission: 'read' | 'write' | 'admin'
+): Promise<boolean> {
+  return checkRepoAccess(agentId, repoId, requiredPermission);
+}
+
+/**
+ * Synchronous version for backward compatibility in non-async contexts
+ * NOTE: This only works with SQLite. Will throw an error with PostgreSQL.
+ * @deprecated Use hasRepoAccess() instead
+ */
+export function hasRepoAccessSync(
   agentId: string | undefined,
   repoId: string,
   requiredPermission: 'read' | 'write' | 'admin'
 ): boolean {
+  // This is a workaround for code that hasn't been migrated to async
+  // It will only work with SQLite
+  const { isUsingPostgres, getDb } = require('../../db/schema.js');
+  if (isUsingPostgres()) {
+    throw new Error('hasRepoAccessSync() cannot be used with PostgreSQL. Use hasRepoAccess() instead.');
+  }
+
   const db = getDb();
 
   // Get repository info
@@ -139,22 +199,17 @@ export function hasRepoAccess(
 /**
  * Generate a new agent token
  */
-export function generateToken(
+export async function generateToken(
   agentId: string,
   permissions: string[],
   expiresInDays: number = 30
-): string {
-  const db = getDb();
+): Promise<string> {
   const token = crypto.randomBytes(32).toString('hex');
   const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-  const id = crypto.randomUUID();
   const now = new Date();
   const expiresAt = new Date(now.getTime() + expiresInDays * 24 * 60 * 60 * 1000);
 
-  db.prepare(`
-    INSERT INTO agent_tokens (id, agent_id, token_hash, permissions, expires_at, created_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(id, agentId, tokenHash, JSON.stringify(permissions), expiresAt.toISOString(), now.toISOString());
+  await createAgentToken(agentId, tokenHash, permissions, expiresAt);
 
   return token;
 }

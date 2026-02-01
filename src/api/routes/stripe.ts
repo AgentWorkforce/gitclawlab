@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import Stripe from 'stripe';
-import { getDb } from '../../db/schema.js';
+import { dbExecute, dbQuery } from '../../db/schema.js';
 import { ulid } from 'ulid';
 
 const router = Router();
@@ -371,7 +371,6 @@ async function handleSubscriptionCreated(subscription: Stripe.Subscription): Pro
     return;
   }
 
-  const db = getDb();
   const id = ulid();
   const now = new Date().toISOString();
 
@@ -384,20 +383,21 @@ async function handleSubscriptionCreated(subscription: Stripe.Subscription): Pro
     ? new Date(firstItem.current_period_end * 1000).toISOString()
     : now;
 
-  db.prepare(`
-    INSERT INTO subscriptions (id, agent_id, stripe_customer_id, stripe_subscription_id, plan_type, status, current_period_start, current_period_end, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    id,
-    agentId,
-    subscription.customer as string,
-    subscription.id,
-    planType,
-    subscription.status,
-    periodStart,
-    periodEnd,
-    now,
-    now
+  await dbExecute(
+    `INSERT INTO subscriptions (id, agent_id, stripe_customer_id, stripe_subscription_id, plan_type, status, current_period_start, current_period_end, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id,
+      agentId,
+      subscription.customer as string,
+      subscription.id,
+      planType,
+      subscription.status,
+      periodStart,
+      periodEnd,
+      now,
+      now
+    ]
   );
 
   console.log(`Created subscription record for agent ${agentId}, plan: ${planType}`);
@@ -406,7 +406,6 @@ async function handleSubscriptionCreated(subscription: Stripe.Subscription): Pro
 async function handleSubscriptionUpdated(subscription: Stripe.Subscription): Promise<void> {
   console.log(`Subscription updated: ${subscription.id}`);
 
-  const db = getDb();
   const now = new Date().toISOString();
 
   // Access period dates from the first subscription item
@@ -439,9 +438,10 @@ async function handleSubscriptionUpdated(subscription: Stripe.Subscription): Pro
 
   values.push(subscription.id);
 
-  db.prepare(`
-    UPDATE subscriptions SET ${updates.join(', ')} WHERE stripe_subscription_id = ?
-  `).run(...values);
+  await dbExecute(
+    `UPDATE subscriptions SET ${updates.join(', ')} WHERE stripe_subscription_id = ?`,
+    values
+  );
 
   console.log(`Updated subscription ${subscription.id}, status: ${subscription.status}`);
 }
@@ -449,12 +449,12 @@ async function handleSubscriptionUpdated(subscription: Stripe.Subscription): Pro
 async function handleSubscriptionDeleted(subscription: Stripe.Subscription): Promise<void> {
   console.log(`Subscription deleted: ${subscription.id}`);
 
-  const db = getDb();
   const now = new Date().toISOString();
 
-  db.prepare(`
-    UPDATE subscriptions SET status = 'canceled', updated_at = ? WHERE stripe_subscription_id = ?
-  `).run(now, subscription.id);
+  await dbExecute(
+    `UPDATE subscriptions SET status = 'canceled', updated_at = ? WHERE stripe_subscription_id = ?`,
+    [now, subscription.id]
+  );
 
   console.log(`Marked subscription ${subscription.id} as canceled`);
 }
@@ -468,21 +468,21 @@ async function handlePaymentSucceeded(invoice: Stripe.Invoice): Promise<void> {
     return;
   }
 
-  const db = getDb();
   const now = new Date().toISOString();
 
   // Record the payment
   const paymentId = ulid();
-  db.prepare(`
-    INSERT INTO payments (id, stripe_invoice_id, stripe_subscription_id, amount, currency, status, created_at)
-    VALUES (?, ?, ?, ?, ?, 'succeeded', ?)
-  `).run(
-    paymentId,
-    invoice.id,
-    invoiceData.subscription as string,
-    invoice.amount_paid,
-    invoice.currency,
-    now
+  await dbExecute(
+    `INSERT INTO payments (id, stripe_invoice_id, stripe_subscription_id, amount, currency, status, created_at)
+     VALUES (?, ?, ?, ?, ?, 'succeeded', ?)`,
+    [
+      paymentId,
+      invoice.id,
+      invoiceData.subscription as string,
+      invoice.amount_paid,
+      invoice.currency,
+      now
+    ]
   );
 
   console.log(`Recorded payment ${paymentId} for ${invoice.amount_paid / 100} ${invoice.currency.toUpperCase()}`);
@@ -497,27 +497,28 @@ async function handlePaymentFailed(invoice: Stripe.Invoice): Promise<void> {
     return;
   }
 
-  const db = getDb();
   const now = new Date().toISOString();
 
   // Record the failed payment
   const paymentId = ulid();
-  db.prepare(`
-    INSERT INTO payments (id, stripe_invoice_id, stripe_subscription_id, amount, currency, status, created_at)
-    VALUES (?, ?, ?, ?, ?, 'failed', ?)
-  `).run(
-    paymentId,
-    invoice.id,
-    invoiceData.subscription as string,
-    invoice.amount_due,
-    invoice.currency,
-    now
+  await dbExecute(
+    `INSERT INTO payments (id, stripe_invoice_id, stripe_subscription_id, amount, currency, status, created_at)
+     VALUES (?, ?, ?, ?, ?, 'failed', ?)`,
+    [
+      paymentId,
+      invoice.id,
+      invoiceData.subscription as string,
+      invoice.amount_due,
+      invoice.currency,
+      now
+    ]
   );
 
   // Update subscription status
-  db.prepare(`
-    UPDATE subscriptions SET status = 'past_due', updated_at = ? WHERE stripe_subscription_id = ?
-  `).run(now, invoiceData.subscription as string);
+  await dbExecute(
+    `UPDATE subscriptions SET status = 'past_due', updated_at = ? WHERE stripe_subscription_id = ?`,
+    [now, invoiceData.subscription as string]
+  );
 
   console.log(`Recorded failed payment for subscription ${invoiceData.subscription}`);
 }

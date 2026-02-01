@@ -1,5 +1,5 @@
 import { Router, Response } from 'express';
-import { getRepository, getDb } from '../../db/schema.js';
+import { getRepository, dbQuery, dbQueryOne, dbExecute } from '../../db/schema.js';
 import { authMiddleware, hasRepoAccess, AuthenticatedRequest } from '../middleware/auth.js';
 import crypto from 'crypto';
 import { ulid } from 'ulid';
@@ -64,26 +64,25 @@ export interface Webhook {
 /**
  * GET /api/repos/:name/webhooks - List webhooks for a repository
  */
-router.get('/repos/:name/webhooks', authMiddleware, (req: AuthenticatedRequest, res: Response) => {
+router.get('/repos/:name/webhooks', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   const { name } = req.params;
 
   try {
-    const repo = getRepository(name);
+    const repo = await getRepository(name);
     if (!repo) {
       res.status(404).json({ error: 'Repository not found' });
       return;
     }
 
-    if (!hasRepoAccess(req.agentId, repo.id, 'admin')) {
+    if (!(await hasRepoAccess(req.agentId, repo.id, 'admin'))) {
       res.status(403).json({ error: 'Permission denied' });
       return;
     }
 
-    const db = getDb();
-    const webhooks = db.prepare('SELECT * FROM webhooks WHERE repo_id = ?').all(repo.id) as any[];
+    const webhooks = await dbQuery('SELECT * FROM webhooks WHERE repo_id = ?', [repo.id]);
 
     // Parse events JSON and mask secrets
-    const result = webhooks.map((w) => ({
+    const result = webhooks.map((w: any) => ({
       ...w,
       events: JSON.parse(w.events),
       secret: w.secret ? '********' : null,
@@ -99,7 +98,7 @@ router.get('/repos/:name/webhooks', authMiddleware, (req: AuthenticatedRequest, 
 /**
  * POST /api/repos/:name/webhooks - Create a webhook
  */
-router.post('/repos/:name/webhooks', authMiddleware, (req: AuthenticatedRequest, res: Response) => {
+router.post('/repos/:name/webhooks', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   const { name } = req.params;
   const { url, events, secret } = req.body;
 
@@ -133,28 +132,28 @@ router.post('/repos/:name/webhooks', authMiddleware, (req: AuthenticatedRequest,
   }
 
   try {
-    const repo = getRepository(name);
+    const repo = await getRepository(name);
     if (!repo) {
       res.status(404).json({ error: 'Repository not found' });
       return;
     }
 
-    if (!hasRepoAccess(req.agentId, repo.id, 'admin')) {
+    if (!(await hasRepoAccess(req.agentId, repo.id, 'admin'))) {
       res.status(403).json({ error: 'Permission denied' });
       return;
     }
 
-    const db = getDb();
     const id = ulid();
     const now = new Date().toISOString();
 
     // Generate a secret if not provided
     const webhookSecret = secret || crypto.randomBytes(20).toString('hex');
 
-    db.prepare(`
-      INSERT INTO webhooks (id, repo_id, url, secret, events, is_active, created_at)
-      VALUES (?, ?, ?, ?, ?, 1, ?)
-    `).run(id, repo.id, url, webhookSecret, JSON.stringify(webhookEvents), now);
+    await dbExecute(
+      `INSERT INTO webhooks (id, repo_id, url, secret, events, is_active, created_at)
+       VALUES (?, ?, ?, ?, ?, 1, ?)`,
+      [id, repo.id, url, webhookSecret, JSON.stringify(webhookEvents), now]
+    );
 
     res.status(201).json({
       id,
@@ -173,23 +172,22 @@ router.post('/repos/:name/webhooks', authMiddleware, (req: AuthenticatedRequest,
 /**
  * GET /api/repos/:name/webhooks/:id - Get webhook details
  */
-router.get('/repos/:name/webhooks/:id', authMiddleware, (req: AuthenticatedRequest, res: Response) => {
+router.get('/repos/:name/webhooks/:id', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   const { name, id } = req.params;
 
   try {
-    const repo = getRepository(name);
+    const repo = await getRepository(name);
     if (!repo) {
       res.status(404).json({ error: 'Repository not found' });
       return;
     }
 
-    if (!hasRepoAccess(req.agentId, repo.id, 'admin')) {
+    if (!(await hasRepoAccess(req.agentId, repo.id, 'admin'))) {
       res.status(403).json({ error: 'Permission denied' });
       return;
     }
 
-    const db = getDb();
-    const webhook = db.prepare('SELECT * FROM webhooks WHERE id = ? AND repo_id = ?').get(id, repo.id) as any;
+    const webhook = await dbQueryOne('SELECT * FROM webhooks WHERE id = ? AND repo_id = ?', [id, repo.id]);
 
     if (!webhook) {
       res.status(404).json({ error: 'Webhook not found' });
@@ -210,24 +208,23 @@ router.get('/repos/:name/webhooks/:id', authMiddleware, (req: AuthenticatedReque
 /**
  * PATCH /api/repos/:name/webhooks/:id - Update webhook
  */
-router.patch('/repos/:name/webhooks/:id', authMiddleware, (req: AuthenticatedRequest, res: Response) => {
+router.patch('/repos/:name/webhooks/:id', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   const { name, id } = req.params;
   const { url, events, is_active, secret } = req.body;
 
   try {
-    const repo = getRepository(name);
+    const repo = await getRepository(name);
     if (!repo) {
       res.status(404).json({ error: 'Repository not found' });
       return;
     }
 
-    if (!hasRepoAccess(req.agentId, repo.id, 'admin')) {
+    if (!(await hasRepoAccess(req.agentId, repo.id, 'admin'))) {
       res.status(403).json({ error: 'Permission denied' });
       return;
     }
 
-    const db = getDb();
-    const webhook = db.prepare('SELECT * FROM webhooks WHERE id = ? AND repo_id = ?').get(id, repo.id);
+    const webhook = await dbQueryOne('SELECT * FROM webhooks WHERE id = ? AND repo_id = ?', [id, repo.id]);
 
     if (!webhook) {
       res.status(404).json({ error: 'Webhook not found' });
@@ -276,10 +273,10 @@ router.patch('/repos/:name/webhooks/:id', authMiddleware, (req: AuthenticatedReq
 
     if (updates.length > 0) {
       values.push(id);
-      db.prepare(`UPDATE webhooks SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+      await dbExecute(`UPDATE webhooks SET ${updates.join(', ')} WHERE id = ?`, values);
     }
 
-    const updated = db.prepare('SELECT * FROM webhooks WHERE id = ?').get(id) as any;
+    const updated = await dbQueryOne('SELECT * FROM webhooks WHERE id = ?', [id]);
 
     res.json({
       ...updated,
@@ -295,28 +292,29 @@ router.patch('/repos/:name/webhooks/:id', authMiddleware, (req: AuthenticatedReq
 /**
  * DELETE /api/repos/:name/webhooks/:id - Delete webhook
  */
-router.delete('/repos/:name/webhooks/:id', authMiddleware, (req: AuthenticatedRequest, res: Response) => {
+router.delete('/repos/:name/webhooks/:id', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   const { name, id } = req.params;
 
   try {
-    const repo = getRepository(name);
+    const repo = await getRepository(name);
     if (!repo) {
       res.status(404).json({ error: 'Repository not found' });
       return;
     }
 
-    if (!hasRepoAccess(req.agentId, repo.id, 'admin')) {
+    if (!(await hasRepoAccess(req.agentId, repo.id, 'admin'))) {
       res.status(403).json({ error: 'Permission denied' });
       return;
     }
 
-    const db = getDb();
-    const result = db.prepare('DELETE FROM webhooks WHERE id = ? AND repo_id = ?').run(id, repo.id);
-
-    if (result.changes === 0) {
+    // Check if webhook exists before deleting
+    const webhook = await dbQueryOne('SELECT id FROM webhooks WHERE id = ? AND repo_id = ?', [id, repo.id]);
+    if (!webhook) {
       res.status(404).json({ error: 'Webhook not found' });
       return;
     }
+
+    await dbExecute('DELETE FROM webhooks WHERE id = ? AND repo_id = ?', [id, repo.id]);
 
     res.status(204).send();
   } catch (error) {
@@ -331,19 +329,18 @@ router.post('/repos/:name/webhooks/:id/test', authMiddleware, async (req: Authen
   const { name, id } = req.params;
 
   try {
-    const repo = getRepository(name);
+    const repo = await getRepository(name);
     if (!repo) {
       res.status(404).json({ error: 'Repository not found' });
       return;
     }
 
-    if (!hasRepoAccess(req.agentId, repo.id, 'admin')) {
+    if (!(await hasRepoAccess(req.agentId, repo.id, 'admin'))) {
       res.status(403).json({ error: 'Permission denied' });
       return;
     }
 
-    const db = getDb();
-    const webhook = db.prepare('SELECT * FROM webhooks WHERE id = ? AND repo_id = ?').get(id, repo.id) as any;
+    const webhook = await dbQueryOne('SELECT * FROM webhooks WHERE id = ? AND repo_id = ?', [id, repo.id]) as any;
 
     if (!webhook) {
       res.status(404).json({ error: 'Webhook not found' });
@@ -413,13 +410,12 @@ export async function deliverWebhooks(
   eventType: string,
   payload: Record<string, any>
 ): Promise<void> {
-  const db = getDb();
-  const webhooks = db.prepare(`
-    SELECT * FROM webhooks
-    WHERE repo_id = ? AND is_active = 1 AND events LIKE ?
-  `).all(repoId, `%"${eventType}"%`) as any[];
+  const webhooks = await dbQuery(
+    `SELECT * FROM webhooks WHERE repo_id = ? AND is_active = 1 AND events LIKE ?`,
+    [repoId, `%"${eventType}"%`]
+  );
 
-  for (const webhook of webhooks) {
+  for (const webhook of webhooks as any[]) {
     // Skip webhooks targeting internal addresses (SSRF protection)
     if (isInternalUrl(webhook.url)) {
       console.error(`Skipping webhook ${webhook.id}: URL targets internal network`);

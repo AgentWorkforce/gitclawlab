@@ -10,9 +10,16 @@ import {
   getRepository,
   listRepositories,
   Repository,
-  getDb,
   createDeployment,
   updateDeployment,
+  canCreateRepo,
+  canDeploy,
+  deleteRepository,
+  updateRepository,
+  getRepoAccessList,
+  grantRepoAccess,
+  revokeRepoAccess,
+  dbExecute,
 } from '../../db/schema.js';
 import { deploy as deployToProvider } from '../../deploy/engine.js';
 import {
@@ -54,7 +61,7 @@ const router = Router();
 /**
  * POST /api/repos - Create a new repository
  */
-router.post('/', authMiddleware, (req: AuthenticatedRequest, res: Response) => {
+router.post('/', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   const { name, description } = req.body;
 
   if (!name) {
@@ -72,13 +79,24 @@ router.post('/', authMiddleware, (req: AuthenticatedRequest, res: Response) => {
 
   try {
     // Check if repo already exists
-    const existing = getRepository(name);
+    const existing = await getRepository(name);
     if (existing) {
       res.status(409).json({ error: 'Repository already exists' });
       return;
     }
 
-    const repo = createRepository(name, req.agentId!, description);
+    // Check repository limits based on plan
+    const repoCheck = await canCreateRepo(req.agentId!);
+    if (!repoCheck.allowed) {
+      res.status(429).json({
+        error: 'Repository limit exceeded',
+        message: repoCheck.reason,
+        upgrade_url: '/app/billing',
+      });
+      return;
+    }
+
+    const repo = await createRepository(name, req.agentId!, description);
     res.status(201).json(repo);
   } catch (error) {
     res.status(500).json({ error: 'Failed to create repository' });
@@ -88,9 +106,9 @@ router.post('/', authMiddleware, (req: AuthenticatedRequest, res: Response) => {
 /**
  * GET /api/repos - List repositories
  */
-router.get('/', optionalAuthMiddleware, (req: AuthenticatedRequest, res: Response) => {
+router.get('/', optionalAuthMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const repos = listRepositories(req.agentId);
+    const repos = await listRepositories(req.agentId);
     res.json(repos);
   } catch (error) {
     res.status(500).json({ error: 'Failed to list repositories' });
@@ -100,18 +118,18 @@ router.get('/', optionalAuthMiddleware, (req: AuthenticatedRequest, res: Respons
 /**
  * GET /api/repos/:name - Get repository details
  */
-router.get('/:name', optionalAuthMiddleware, (req: AuthenticatedRequest, res: Response) => {
+router.get('/:name', optionalAuthMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   const { name } = req.params;
 
   try {
-    const repo = getRepository(name);
+    const repo = await getRepository(name);
     if (!repo) {
       res.status(404).json({ error: 'Repository not found' });
       return;
     }
 
     // Check access for private repos
-    if (repo.is_private && !hasRepoAccess(req.agentId, repo.id, 'read')) {
+    if (repo.is_private && !(await hasRepoAccess(req.agentId, repo.id, 'read'))) {
       res.status(404).json({ error: 'Repository not found' });
       return;
     }
@@ -130,14 +148,14 @@ router.delete('/:name', authMiddleware, async (req: AuthenticatedRequest, res: R
   const { undeploy } = req.query; // ?undeploy=true to also remove Railway service
 
   try {
-    const repo = getRepository(name);
+    const repo = await getRepository(name);
     if (!repo) {
       res.status(404).json({ error: 'Repository not found' });
       return;
     }
 
     // Only owner or admin can delete
-    if (!hasRepoAccess(req.agentId, repo.id, 'admin')) {
+    if (!(await hasRepoAccess(req.agentId, repo.id, 'admin'))) {
       res.status(403).json({ error: 'Permission denied' });
       return;
     }
@@ -178,13 +196,8 @@ router.delete('/:name', authMiddleware, async (req: AuthenticatedRequest, res: R
       }
     }
 
-    const db = getDb();
-
-    // Delete related records first
-    db.prepare('DELETE FROM repo_access WHERE repo_id = ?').run(repo.id);
-    db.prepare('DELETE FROM webhooks WHERE repo_id = ?').run(repo.id);
-    db.prepare('DELETE FROM deployments WHERE repo_id = ?').run(repo.id);
-    db.prepare('DELETE FROM repositories WHERE id = ?').run(repo.id);
+    // Delete repository and all related records
+    await deleteRepository(repo.id);
 
     res.status(200).json({
       deleted: true,
@@ -199,48 +212,28 @@ router.delete('/:name', authMiddleware, async (req: AuthenticatedRequest, res: R
 /**
  * PATCH /api/repos/:name - Update repository
  */
-router.patch('/:name', authMiddleware, (req: AuthenticatedRequest, res: Response) => {
+router.patch('/:name', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   const { name } = req.params;
   const { description, is_private, default_branch } = req.body;
 
   try {
-    const repo = getRepository(name);
+    const repo = await getRepository(name);
     if (!repo) {
       res.status(404).json({ error: 'Repository not found' });
       return;
     }
 
-    if (!hasRepoAccess(req.agentId, repo.id, 'admin')) {
+    if (!(await hasRepoAccess(req.agentId, repo.id, 'admin'))) {
       res.status(403).json({ error: 'Permission denied' });
       return;
     }
 
-    const db = getDb();
-    const updates: string[] = [];
-    const values: any[] = [];
+    const updates: any = {};
+    if (description !== undefined) updates.description = description;
+    if (is_private !== undefined) updates.is_private = is_private;
+    if (default_branch !== undefined) updates.default_branch = default_branch;
 
-    if (description !== undefined) {
-      updates.push('description = ?');
-      values.push(description);
-    }
-    if (is_private !== undefined) {
-      updates.push('is_private = ?');
-      values.push(is_private ? 1 : 0);
-    }
-    if (default_branch !== undefined) {
-      updates.push('default_branch = ?');
-      values.push(default_branch);
-    }
-
-    if (updates.length > 0) {
-      updates.push('updated_at = ?');
-      values.push(new Date().toISOString());
-      values.push(repo.id);
-
-      db.prepare(`UPDATE repositories SET ${updates.join(', ')} WHERE id = ?`).run(...values);
-    }
-
-    const updated = getRepository(name);
+    const updated = await updateRepository(repo.id, updates);
     res.json(updated);
   } catch (error) {
     res.status(500).json({ error: 'Failed to update repository' });
@@ -250,23 +243,22 @@ router.patch('/:name', authMiddleware, (req: AuthenticatedRequest, res: Response
 /**
  * GET /api/repos/:name/access - List repository access permissions
  */
-router.get('/:name/access', authMiddleware, (req: AuthenticatedRequest, res: Response) => {
+router.get('/:name/access', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   const { name } = req.params;
 
   try {
-    const repo = getRepository(name);
+    const repo = await getRepository(name);
     if (!repo) {
       res.status(404).json({ error: 'Repository not found' });
       return;
     }
 
-    if (!hasRepoAccess(req.agentId, repo.id, 'admin')) {
+    if (!(await hasRepoAccess(req.agentId, repo.id, 'admin'))) {
       res.status(403).json({ error: 'Permission denied' });
       return;
     }
 
-    const db = getDb();
-    const access = db.prepare('SELECT * FROM repo_access WHERE repo_id = ?').all(repo.id);
+    const access = await getRepoAccessList(repo.id);
     res.json(access);
   } catch (error) {
     res.status(500).json({ error: 'Failed to get access list' });
@@ -276,7 +268,7 @@ router.get('/:name/access', authMiddleware, (req: AuthenticatedRequest, res: Res
 /**
  * POST /api/repos/:name/access - Grant repository access
  */
-router.post('/:name/access', authMiddleware, (req: AuthenticatedRequest, res: Response) => {
+router.post('/:name/access', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   const { name } = req.params;
   const { agent_id, permission } = req.body;
 
@@ -291,27 +283,19 @@ router.post('/:name/access', authMiddleware, (req: AuthenticatedRequest, res: Re
   }
 
   try {
-    const repo = getRepository(name);
+    const repo = await getRepository(name);
     if (!repo) {
       res.status(404).json({ error: 'Repository not found' });
       return;
     }
 
-    if (!hasRepoAccess(req.agentId, repo.id, 'admin')) {
+    if (!(await hasRepoAccess(req.agentId, repo.id, 'admin'))) {
       res.status(403).json({ error: 'Permission denied' });
       return;
     }
 
-    const db = getDb();
-    const id = crypto.randomUUID();
-    const now = new Date().toISOString();
-
-    db.prepare(`
-      INSERT OR REPLACE INTO repo_access (id, repo_id, agent_id, permission, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(id, repo.id, agent_id, permission, now);
-
-    res.status(201).json({ id, repo_id: repo.id, agent_id, permission, created_at: now });
+    const result = await grantRepoAccess(repo.id, agent_id, permission);
+    res.status(201).json(result);
   } catch (error) {
     res.status(500).json({ error: 'Failed to grant access' });
   }
@@ -320,24 +304,22 @@ router.post('/:name/access', authMiddleware, (req: AuthenticatedRequest, res: Re
 /**
  * DELETE /api/repos/:name/access/:agentId - Revoke repository access
  */
-router.delete('/:name/access/:agentId', authMiddleware, (req: AuthenticatedRequest, res: Response) => {
+router.delete('/:name/access/:agentId', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
   const { name, agentId } = req.params;
 
   try {
-    const repo = getRepository(name);
+    const repo = await getRepository(name);
     if (!repo) {
       res.status(404).json({ error: 'Repository not found' });
       return;
     }
 
-    if (!hasRepoAccess(req.agentId, repo.id, 'admin')) {
+    if (!(await hasRepoAccess(req.agentId, repo.id, 'admin'))) {
       res.status(403).json({ error: 'Permission denied' });
       return;
     }
 
-    const db = getDb();
-    db.prepare('DELETE FROM repo_access WHERE repo_id = ? AND agent_id = ?').run(repo.id, agentId);
-
+    await revokeRepoAccess(repo.id, agentId);
     res.status(204).send();
   } catch (error) {
     res.status(500).json({ error: 'Failed to revoke access' });
@@ -414,14 +396,14 @@ router.post(
 
     try {
       // Get repository
-      const repo = getRepository(name);
+      const repo = await getRepository(name);
       if (!repo) {
         res.status(404).json({ error: 'Repository not found' });
         return;
       }
 
       // Check write access
-      if (!hasRepoAccess(req.agentId, repo.id, 'write')) {
+      if (!(await hasRepoAccess(req.agentId, repo.id, 'write'))) {
         res.status(403).json({ error: 'Permission denied' });
         return;
       }
@@ -567,9 +549,11 @@ router.post(
         }
 
         // Update repository last_push_at
-        const db = getDb();
-        db.prepare('UPDATE repositories SET last_push_at = ?, updated_at = ? WHERE id = ?')
-          .run(new Date().toISOString(), new Date().toISOString(), repo.id);
+        const now = new Date().toISOString();
+        await dbExecute(
+          'UPDATE repositories SET last_push_at = ?, updated_at = ? WHERE id = ?',
+          [now, now, repo.id]
+        );
 
         // Cleanup clone directory
         rmSync(cloneDir, { recursive: true, force: true });
@@ -578,12 +562,30 @@ router.post(
         let deployment = null;
         let deployResult = null;
         if (deploy === 'true') {
+          // Check deployment limits based on plan
+          const deployCheck = await canDeploy(req.agentId!);
+          if (!deployCheck.allowed) {
+            // Upload succeeded but deployment blocked by limits
+            res.status(200).json({
+              success: true,
+              repository: name,
+              commit_sha: commitSha,
+              deployment: null,
+              deployment_blocked: {
+                error: 'Deployment limit exceeded',
+                message: deployCheck.reason,
+                upgrade_url: '/app/billing',
+              },
+            });
+            return;
+          }
+
           const validTargets = ['railway', 'fly'];
           const deployTarget = (validTargets.includes(target as string) ? target as string : 'railway') as 'railway' | 'fly';
-          deployment = createDeployment(repo.id, commitSha, deployTarget, req.agentId!);
+          deployment = await createDeployment(repo.id, commitSha, deployTarget, req.agentId!);
 
           // Update status to building
-          updateDeployment(deployment.id, { status: 'building' });
+          await updateDeployment(deployment.id, { status: 'building' });
 
           // Actually deploy using the deploy engine
           try {
@@ -596,7 +598,7 @@ router.post(
 
             // Update deployment record with result
             if (deployResult.success) {
-              updateDeployment(deployment.id, {
+              await updateDeployment(deployment.id, {
                 status: 'success',
                 url: deployResult.url,
                 subdomain: deployResult.customDomain,
@@ -604,14 +606,14 @@ router.post(
                 completed_at: new Date().toISOString(),
               });
             } else {
-              updateDeployment(deployment.id, {
+              await updateDeployment(deployment.id, {
                 status: 'failed',
                 logs: deployResult.logs.join('\n') + '\n\nError: ' + deployResult.error,
                 completed_at: new Date().toISOString(),
               });
             }
           } catch (deployError: any) {
-            updateDeployment(deployment.id, {
+            await updateDeployment(deployment.id, {
               status: 'failed',
               logs: `Deployment error: ${deployError.message}`,
               completed_at: new Date().toISOString(),
