@@ -336,22 +336,8 @@ export async function addCustomDomain(
   logs.push(`Adding custom domain: ${domain}`);
 
   try {
-    const args = ['domain', domain];
-
-    // Add service targeting for multi-service projects
-    if (serviceName) {
-      args.push('--service', serviceName);
-    }
-
-    // Add project/environment context if available
-    const projectId = process.env.RAILWAY_PROJECT_ID;
-    const envId = process.env.RAILWAY_ENVIRONMENT_ID;
-    if (projectId) {
-      args.push('--project', projectId);
-    }
-    if (envId) {
-      args.push('--environment', envId);
-    }
+    // railway domain only accepts --service flag, not --project or --environment
+    const args = ['domain', '--service', serviceName || 'default', domain];
 
     const { stdout } = await execa('railway', args, {
       cwd: repoPath,
