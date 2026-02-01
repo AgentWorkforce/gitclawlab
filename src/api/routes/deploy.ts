@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import { join } from 'path';
 import {
   createDeployment,
   getDeployment,
@@ -14,6 +15,8 @@ import {
   AuthenticatedRequest,
 } from '../middleware/auth.js';
 import { track } from '../../analytics/posthog.js';
+import { deploy as deployToProvider } from '../../deploy/engine.js';
+import { getRepositoriesPath } from '../../git/soft-serve.js';
 
 const router = Router();
 
@@ -69,11 +72,38 @@ router.post('/repos/:name/deploy', authMiddleware, async (req: AuthenticatedRequ
       target,
     });
 
-    // In a real implementation, this would trigger the actual deployment
-    // For now, we just create the deployment record
-    // The deployment worker would pick this up and process it
-
+    // Return immediately, then run deployment async
     res.status(201).json(deployment);
+
+    // Trigger actual deployment in background
+    const repoPath = join(getRepositoriesPath(), name);
+
+    (async () => {
+      try {
+        await updateDeployment(deployment.id, { status: 'building' });
+
+        const deployResult = await deployToProvider({
+          repoPath,
+          commitSha: sha,
+          provider: target as 'railway' | 'fly',
+          appName: name,
+        });
+
+        await updateDeployment(deployment.id, {
+          status: deployResult.success ? 'success' : 'failed',
+          url: deployResult.url || null,
+          subdomain: deployResult.customDomain || null,
+          logs: deployResult.logs.join('\n'),
+          completed_at: new Date().toISOString(),
+        });
+      } catch (err) {
+        await updateDeployment(deployment.id, {
+          status: 'failed',
+          logs: `Deployment error: ${err instanceof Error ? err.message : 'Unknown error'}`,
+          completed_at: new Date().toISOString(),
+        });
+      }
+    })();
   } catch (error) {
     res.status(500).json({ error: 'Failed to create deployment' });
   }
