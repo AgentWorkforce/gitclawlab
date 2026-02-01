@@ -108,8 +108,20 @@ export async function deployToRailway(options: DeployOptions): Promise<DeployRes
       logs.push('Using RAILWAY_API_TOKEN for authentication');
     }
 
-    // Use --service flag to deploy as a named service
-    const deployProcess = execa('railway', ['up', '--detach', '--service', appName], {
+    // Build command args - need project ID to deploy to the right project
+    const projectId = process.env.RAILWAY_PROJECT_ID;
+    const envId = process.env.RAILWAY_ENVIRONMENT_ID;
+
+    const args = ['up', '--detach', '--service', appName];
+    if (projectId) {
+      args.push('--project', projectId);
+      logs.push(`Deploying to project: ${projectId}`);
+    }
+    if (envId) {
+      args.push('--environment', envId);
+    }
+
+    const deployProcess = execa('railway', args, {
       cwd: repoPath,
       timeout: 600000, // 10 minute timeout
       env: deployEnv,
