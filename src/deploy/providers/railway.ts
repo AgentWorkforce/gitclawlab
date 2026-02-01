@@ -94,11 +94,25 @@ export async function deployToRailway(options: DeployOptions): Promise<DeployRes
   logs.push('Deploying to Railway...');
 
   try {
+    // Build environment with proper token handling
+    // RAILWAY_API_TOKEN works with account tokens, RAILWAY_TOKEN with project tokens
+    const deployEnv: Record<string, string> = {
+      ...process.env as Record<string, string>,
+      CI: 'true',
+    };
+
+    // If we have RAILWAY_API_TOKEN, use it and clear RAILWAY_TOKEN to avoid conflicts
+    if (process.env.RAILWAY_API_TOKEN) {
+      deployEnv.RAILWAY_API_TOKEN = process.env.RAILWAY_API_TOKEN;
+      delete deployEnv.RAILWAY_TOKEN;
+      logs.push('Using RAILWAY_API_TOKEN for authentication');
+    }
+
     // Use --service flag to deploy as a named service
     const deployProcess = execa('railway', ['up', '--detach', '--service', appName], {
       cwd: repoPath,
       timeout: 600000, // 10 minute timeout
-      env: { ...process.env, CI: 'true' },
+      env: deployEnv,
     });
 
     deployProcess.stdout?.on('data', (data) => {
