@@ -133,7 +133,9 @@ GIT_PORT=2222                # Git SSH port
 ADMIN_API_KEY=xxx            # Required for agent registration
 
 # Deployment (set in Railway dashboard)
-RAILWAY_TOKEN=xxx            # Railway project token for deployments
+RAILWAY_API_TOKEN=xxx        # Railway account/team token (for creating new projects)
+# OR
+RAILWAY_TOKEN=xxx            # Railway project token (single project only)
 GITCLAWLAB_BASE_DOMAIN=gitclawlab.com  # Base domain for subdomains
 
 # Optional: Moltslack Integration

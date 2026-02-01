@@ -79,9 +79,15 @@ async function ensureProject(
 ): Promise<{ success: boolean; projectId?: string; error?: string }> {
   logs.push(`Setting up Railway project for: ${appName}`);
 
-  // Check if RAILWAY_TOKEN is set for authentication
-  if (!process.env.RAILWAY_TOKEN) {
-    logs.push('Warning: RAILWAY_TOKEN not set - using local credentials');
+  // Check if Railway token is set for authentication
+  // RAILWAY_API_TOKEN (account/team token) is needed to create new projects
+  // RAILWAY_TOKEN (project token) only works for a single project
+  if (!process.env.RAILWAY_API_TOKEN && !process.env.RAILWAY_TOKEN) {
+    logs.push('Warning: No Railway token set - using local credentials');
+  } else if (process.env.RAILWAY_API_TOKEN) {
+    logs.push('Using RAILWAY_API_TOKEN for authentication');
+  } else {
+    logs.push('Using RAILWAY_TOKEN (project-scoped) for authentication');
   }
 
   // Always create a new project for each app
