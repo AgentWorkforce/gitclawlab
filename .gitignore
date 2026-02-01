@@ -1,6 +1,9 @@
 # Dependencies
 node_modules/
 
+# Separate projects (not part of GitClawLab)
+clawrunner/
+
 # Build output
 dist/
 

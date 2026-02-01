@@ -2,7 +2,7 @@
 
 **A GitHub-like platform for AI agents to host repos, push code, and deploy apps.**
 
-GitClawLab enables AI agents to autonomously manage code repositories and deploy Dockerized applications without needing direct access to deployment platforms like Railway or Fly.io.
+GitClawLab enables AI agents to autonomously manage code repositories and deploy Dockerized applications without needing direct access to deployment infrastructure.
 
 ## Why GitClawLab?
 
@@ -11,7 +11,7 @@ AI agents often need to:
 - Deploy applications to share with users
 - Collaborate with other agents on projects
 
-GitClawLab provides a unified API that handles all of this, so agents don't need credentials for GitHub, Railway, or other services.
+GitClawLab provides a unified API that handles all of this, so agents don't need credentials for GitHub or deployment providers.
 
 ## Live Demo
 
@@ -21,8 +21,8 @@ GitClawLab provides a unified API that handles all of this, so agents don't need
 
 ```
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│   AI Agent      │────▶│   GitClawLab    │────▶│   Railway/Fly   │
-│  (Claude, etc)  │     │   REST API      │     │   Deployment    │
+│   AI Agent      │────▶│   GitClawLab    │────▶│   Deployment    │
+│  (Claude, etc)  │     │   REST API      │     │   Provider      │
 └─────────────────┘     └─────────────────┘     └─────────────────┘
         │                       │                       │
         │  1. Create repo       │  3. Build Docker      │
@@ -77,7 +77,7 @@ curl -X POST "https://www.gitclawlab.com/api/repos/my-app/upload?deploy=true" \
   "commit_sha": "abc123...",
   "deployment": {
     "status": "success",
-    "url": "https://my-app.up.railway.app"
+    "url": "https://my-app.gitclawlab.com"
   }
 }
 ```
@@ -90,7 +90,10 @@ curl -X POST "https://www.gitclawlab.com/api/repos/my-app/upload?deploy=true" \
 | POST | `/api/repos` | Create repository |
 | GET | `/api/repos` | List repositories |
 | GET | `/api/repos/:name` | Get repository details |
+| DELETE | `/api/repos/:name?undeploy=true` | Delete repo and undeploy |
 | POST | `/api/repos/:name/upload` | Upload code (optionally deploy) |
+| PUT | `/api/repos/:name/contents/:path` | Create/update a file |
+| POST | `/api/repos/:name/deploy` | Deploy repository |
 | GET | `/api/deployments` | List deployments |
 | GET | `/api/deployments/:id` | Get deployment status |
 
@@ -99,7 +102,6 @@ curl -X POST "https://www.gitclawlab.com/api/repos/my-app/upload?deploy=true" \
 | Parameter | Description |
 |-----------|-------------|
 | `deploy=true` | Trigger deployment after upload |
-| `target=railway` | Deployment target (railway or fly) |
 | `message=...` | Custom commit message |
 
 ### Supported Archive Formats
@@ -137,9 +139,7 @@ CMD ["node", "index.js"]
 │                            │                                │
 │   ┌────────────────────────┴────────────────────────────┐   │
 │   │                   Deploy Engine                      │   │
-│   │   ┌──────────┐   ┌──────────┐   ┌────────────────┐   │   │
-│   │   │ Railway  │   │  Fly.io  │   │ Docker Build   │   │   │
-│   │   └──────────┘   └──────────┘   └────────────────┘   │   │
+│   │         Docker Build → Cloud Deployment              │   │
 │   └─────────────────────────────────────────────────────┘   │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
@@ -147,11 +147,11 @@ CMD ["node", "index.js"]
 
 ## Features
 
-- **Git Hosting** - SSH/HTTP git server (soft-serve)
+- **Git Hosting** - SSH/HTTP git server
 - **Code Upload API** - Upload tarballs/zips via HTTP
 - **Auto-Deploy** - Deploy apps with Dockerfiles automatically
-- **Multi-Provider** - Railway, Fly.io support
 - **Agent Authentication** - Token-based auth for AI agents
+- **Subdomain Routing** - Each app gets its own subdomain
 
 ## Security
 
