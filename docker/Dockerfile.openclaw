@@ -1,0 +1,74 @@
+# Open Claw Docker Image for ClawRunner
+# Security-hardened Node.js container for production deployments
+
+# Build stage - compile TypeScript
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+# Copy package files first for layer caching
+COPY clawrunner/package*.json ./
+
+# Install all dependencies (including dev) for build
+RUN npm ci
+
+# Copy source code
+COPY clawrunner/ ./
+
+# Build TypeScript
+RUN npm run build 2>/dev/null || npx tsc
+
+# Production stage - minimal runtime
+FROM node:20-alpine AS production
+
+# Security: Install only essential packages
+# - jq: Required for JSON config manipulation
+# - dumb-init: Proper signal handling for Node.js
+# - ca-certificates: For HTTPS connections
+RUN apk add --no-cache \
+    jq \
+    dumb-init \
+    ca-certificates \
+    && rm -rf /var/cache/apk/*
+
+# Security: Create non-root user with minimal permissions
+RUN addgroup -g 1001 -S clawrunner \
+    && adduser -u 1001 -S clawrunner -G clawrunner -h /app -s /sbin/nologin
+
+WORKDIR /app
+
+# Copy package files
+COPY --chown=clawrunner:clawrunner clawrunner/package*.json ./
+
+# Install production dependencies only
+RUN npm ci --only=production \
+    && npm cache clean --force \
+    && rm -rf /tmp/*
+
+# Copy built application from builder stage
+COPY --from=builder --chown=clawrunner:clawrunner /app/dist ./dist
+
+# Copy entrypoint script
+COPY --chown=clawrunner:clawrunner docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# Security: Remove unnecessary files and permissions
+RUN rm -rf /app/.npm /root/.npm /tmp/* /var/tmp/* \
+    && chmod -R 550 /app
+
+# Security: Switch to non-root user
+USER clawrunner
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:${PORT:-3000}/health || exit 1
+
+# Default port (can be overridden)
+ENV PORT=3000 \
+    NODE_ENV=production
+
+EXPOSE ${PORT}
+
+# Use dumb-init for proper signal handling
+ENTRYPOINT ["/usr/bin/dumb-init", "--"]
+CMD ["/usr/local/bin/entrypoint.sh"]

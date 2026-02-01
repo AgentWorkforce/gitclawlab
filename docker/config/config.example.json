@@ -1,0 +1,21 @@
+{
+  "server": {
+    "port": 3000,
+    "host": "0.0.0.0"
+  },
+  "database": {
+    "url": "",
+    "pool": {
+      "min": 2,
+      "max": 10
+    }
+  },
+  "nango": {
+    "publicKey": "",
+    "secretKey": ""
+  },
+  "logging": {
+    "level": "info",
+    "format": "json"
+  }
+}

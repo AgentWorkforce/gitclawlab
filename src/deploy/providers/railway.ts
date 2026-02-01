@@ -245,7 +245,7 @@ export async function deployToRailway(options: DeployOptions): Promise<DeployRes
     const domainToAdd = customDomain || generateSubdomain(appName);
 
     if (domainToAdd) {
-      const domainResult = await addCustomDomain(domainToAdd, repoPath, logs);
+      const domainResult = await addCustomDomain(domainToAdd, repoPath, logs, appName);
       if (domainResult.success) {
         configuredCustomDomain = domainToAdd;
         logs.push(`App accessible at: https://${domainToAdd}`);
@@ -322,14 +322,33 @@ export const GITCLAWLAB_BASE_DOMAIN = process.env.GITCLAWLAB_BASE_DOMAIN || 'git
 export async function addCustomDomain(
   domain: string,
   repoPath: string,
-  logs: string[]
+  logs: string[],
+  serviceName?: string
 ): Promise<{ success: boolean; error?: string }> {
   logs.push(`Adding custom domain: ${domain}`);
 
   try {
-    const { stdout } = await execa('railway', ['domain', domain], {
+    const args = ['domain', domain];
+
+    // Add service targeting for multi-service projects
+    if (serviceName) {
+      args.push('--service', serviceName);
+    }
+
+    // Add project/environment context if available
+    const projectId = process.env.RAILWAY_PROJECT_ID;
+    const envId = process.env.RAILWAY_ENVIRONMENT_ID;
+    if (projectId) {
+      args.push('--project', projectId);
+    }
+    if (envId) {
+      args.push('--environment', envId);
+    }
+
+    const { stdout } = await execa('railway', args, {
       cwd: repoPath,
       timeout: 30000,
+      env: { ...process.env, CI: 'true' },
     });
     logs.push(`Custom domain added: ${stdout.trim() || domain}`);
     return { success: true };

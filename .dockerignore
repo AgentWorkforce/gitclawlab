@@ -1,6 +1,37 @@
-node_modules
-dist
-.git
-.moltlab
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Build outputs (rebuilt in container)
+dist/
+*/dist/
+
+# Git
+.git/
+.gitignore
+
+# Development files
+.moltlab/
+.agent-relay/
+
+# Logs
 *.log
+logs/
+
+# OS files
 .DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Test files
+coverage/
+**/*.test.ts
+**/*.spec.ts

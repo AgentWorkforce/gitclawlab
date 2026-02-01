@@ -1,0 +1,71 @@
+# Docker Compose for ClawRunner Local Testing
+# Usage: docker-compose -f docker/docker-compose.yml up --build
+
+version: '3.8'
+
+services:
+  clawrunner:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.openclaw
+    container_name: clawrunner
+    ports:
+      - "${PORT:-3000}:${PORT:-3000}"
+    environment:
+      - NODE_ENV=development
+      - PORT=${PORT:-3000}
+      - DATABASE_URL=${DATABASE_URL:-}
+      - NANGO_SECRET_KEY=${NANGO_SECRET_KEY:-}
+      - NANGO_PUBLIC_KEY=${NANGO_PUBLIC_KEY:-}
+    volumes:
+      # Mount config directory for local testing (optional)
+      - ./config:/app/config:ro
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:${PORT:-3000}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    # Security: Read-only root filesystem
+    read_only: true
+    # Allow writing to /tmp for temporary files
+    tmpfs:
+      - /tmp
+    # Security: Drop all capabilities, add only what's needed
+    cap_drop:
+      - ALL
+    # Security: No new privileges
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - clawrunner-network
+
+  # Development service with hot reload (mounts source code)
+  clawrunner-dev:
+    profiles: ["dev"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.openclaw
+      target: builder
+    container_name: clawrunner-dev
+    ports:
+      - "${DEV_PORT:-3001}:${PORT:-3000}"
+    environment:
+      - NODE_ENV=development
+      - PORT=${PORT:-3000}
+    volumes:
+      - ../clawrunner/src:/app/src:ro
+      - ../clawrunner/package.json:/app/package.json:ro
+    command: npx tsx watch src/index.ts
+    networks:
+      - clawrunner-network
+
+networks:
+  clawrunner-network:
+    driver: bridge
+
+# Optional: Volume for persistent data
+volumes:
+  clawrunner-data:
+    driver: local
