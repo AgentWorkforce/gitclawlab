@@ -1,7 +1,8 @@
 import { Router, Request, Response } from 'express';
 import { ulid } from 'ulid';
 import crypto from 'crypto';
-import { dbQuery, dbQueryOne, dbExecute, createAgentToken } from '../../db/schema.js';
+import { getDb } from '../../db/schema.js';
+import { track } from '../../analytics/posthog.js';
 
 const router = Router();
 
@@ -49,6 +50,9 @@ router.post('/', async (req: Request, res: Response) => {
     // Store token hash
     const expiresAt = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000); // 1 year
     await createAgentToken(id, tokenHash, capabilities || ['repos'], expiresAt);
+
+    // Track agent registration
+    track(id, 'agent_registered', { agent_id: id, agent_name: name });
 
     res.status(201).json({
       id,

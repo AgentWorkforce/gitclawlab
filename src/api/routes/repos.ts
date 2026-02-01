@@ -29,6 +29,7 @@ import {
   AuthenticatedRequest,
 } from '../middleware/auth.js';
 import { getRepositoriesPath } from '../../git/soft-serve.js';
+import { track } from '../../analytics/posthog.js';
 
 // Upload configuration
 const MAX_UPLOAD_SIZE = 100 * 1024 * 1024; // 100MB
@@ -85,18 +86,11 @@ router.post('/', authMiddleware, async (req: AuthenticatedRequest, res: Response
       return;
     }
 
-    // Check repository limits based on plan
-    const repoCheck = await canCreateRepo(req.agentId!);
-    if (!repoCheck.allowed) {
-      res.status(429).json({
-        error: 'Repository limit exceeded',
-        message: repoCheck.reason,
-        upgrade_url: '/app/billing',
-      });
-      return;
-    }
+    const repo = createRepository(name, req.agentId!, description);
 
-    const repo = await createRepository(name, req.agentId!, description);
+    // Track repo creation
+    track(req.agentId!, 'repo_created', { repo_id: repo.id, repo_name: name });
+
     res.status(201).json(repo);
   } catch (error) {
     res.status(500).json({ error: 'Failed to create repository' });
@@ -621,6 +615,15 @@ router.post(
             deployResult = { success: false, error: deployError.message, logs: [] };
           }
         }
+
+        // Track repo upload
+        track(req.agentId!, 'repo_uploaded', {
+          repo_id: repo.id,
+          repo_name: name,
+          files_count: allFiles.length,
+          has_changes: hasChanges,
+          triggered_deploy: deploy === 'true',
+        });
 
         res.status(201).json({
           success: true,

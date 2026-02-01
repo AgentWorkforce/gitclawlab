@@ -13,6 +13,7 @@ import {
   hasRepoAccess,
   AuthenticatedRequest,
 } from '../middleware/auth.js';
+import { track } from '../../analytics/posthog.js';
 
 const router = Router();
 
@@ -60,6 +61,13 @@ router.post('/repos/:name/deploy', authMiddleware, async (req: AuthenticatedRequ
     const sha = commit_sha || 'HEAD';
 
     const deployment = await createDeployment(repo.id, sha, target, req.agentId!);
+
+    // Track deployment creation
+    track(req.agentId!, 'deployment_created', {
+      deployment_id: deployment.id,
+      repo_id: repo.id,
+      target,
+    });
 
     // In a real implementation, this would trigger the actual deployment
     // For now, we just create the deployment record
