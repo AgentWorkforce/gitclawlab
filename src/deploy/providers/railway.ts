@@ -227,9 +227,17 @@ export async function deployToRailway(options: DeployOptions): Promise<DeployRes
     // If no URL in output, try to get the domain
     if (!railwayUrl) {
       try {
-        const { stdout: domainOutput } = await execa('railway', ['domain'], {
+        const domainArgs = ['domain', '--service', appName];
+        if (projectId) {
+          domainArgs.push('--project', projectId);
+        }
+        if (envId) {
+          domainArgs.push('--environment', envId);
+        }
+        const { stdout: domainOutput } = await execa('railway', domainArgs, {
           cwd: repoPath,
           timeout: 10000,
+          env: deployEnv,
         });
         const domain = domainOutput.trim();
         if (domain) {
