@@ -289,6 +289,13 @@ export async function listDeployments(repoId?: string): Promise<Deployment[]> {
   return query<Deployment>(`SELECT * FROM deployments ORDER BY started_at DESC`);
 }
 
+export async function getLatestSuccessfulDeployment(repoId: string): Promise<Deployment | null> {
+  return queryOne<Deployment>(
+    `SELECT * FROM deployments WHERE repo_id = ? AND status = 'success' AND url IS NOT NULL ORDER BY completed_at DESC LIMIT 1`,
+    [repoId]
+  );
+}
+
 // Subscription operations
 export interface Subscription {
   id: string;

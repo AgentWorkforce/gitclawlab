@@ -9,7 +9,7 @@ import YAML from 'yaml';
 import { ulid } from 'ulid';
 import type { DeployOptions, DeployResult, MoltlabConfig, DeployProvider, ProviderStatus } from './types.js';
 import { checkDocker, hasDockerfile, buildImage, removeImage } from './docker.js';
-import { checkRailwayStatus, deployToRailway } from './providers/railway.js';
+import { checkRailwayStatus, deployToRailway, pollRailwayDeployment } from './providers/railway.js';
 import { checkFlyStatus, deployToFly } from './providers/fly.js';
 import { notifyDeployment, notifyBuildError } from '../moltslack/notifications.js';
 
@@ -229,6 +229,42 @@ export async function deploy(options: DeployEngineOptions): Promise<DeployEngine
     if (provider === 'railway') {
       logs.push('Deploying to Railway...');
       result = await deployToRailway(deployOptions);
+
+      // If deployment was triggered but we don't have a clear success/failure,
+      // poll Railway for the actual build status and logs
+      const projectId = process.env.RAILWAY_PROJECT_ID;
+      if (projectId && result.success) {
+        logs.push('Polling Railway for deployment status...');
+        const pollResult = await pollRailwayDeployment(projectId, appName, {
+          maxWaitMs: 5 * 60 * 1000, // 5 minutes
+          pollIntervalMs: 10000, // 10 seconds
+          onStatusChange: (status) => logs.push(status),
+        });
+
+        if (!pollResult.success) {
+          result.success = false;
+          result.error = `Railway build failed: ${pollResult.status}`;
+          if (pollResult.buildLogs) {
+            result.logs.push('--- Railway Build Logs ---');
+            result.logs.push(pollResult.buildLogs);
+            result.logs.push('--- End Build Logs ---');
+          }
+        } else if (pollResult.url && !result.url) {
+          result.url = pollResult.url;
+        }
+      } else if (projectId && !result.success) {
+        // Deployment trigger failed, try to get build logs anyway
+        logs.push('Deployment trigger failed, fetching build logs...');
+        const pollResult = await pollRailwayDeployment(projectId, appName, {
+          maxWaitMs: 30000, // 30 seconds - just check current status
+          pollIntervalMs: 5000,
+        });
+        if (pollResult.buildLogs) {
+          result.logs.push('--- Railway Build Logs ---');
+          result.logs.push(pollResult.buildLogs);
+          result.logs.push('--- End Build Logs ---');
+        }
+      }
   } else if (provider === 'fly') {
     logs.push('Deploying to Fly.io...');
     result = await deployToFly(deployOptions);
@@ -296,5 +332,5 @@ export async function quickDeploy(repoPath: string, provider?: DeployProvider): 
 // Re-export types and utilities
 export type { DeployOptions, DeployResult, MoltlabConfig, DeployProvider, ProviderStatus } from './types.js';
 export { checkDocker, hasDockerfile, buildImage } from './docker.js';
-export { checkRailwayStatus, deployToRailway } from './providers/railway.js';
+export { checkRailwayStatus, deployToRailway, pollRailwayDeployment, getRailwayBuildLogs } from './providers/railway.js';
 export { checkFlyStatus, deployToFly } from './providers/fly.js';

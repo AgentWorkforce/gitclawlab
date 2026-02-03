@@ -86,7 +86,7 @@ router.post('/', authMiddleware, async (req: AuthenticatedRequest, res: Response
       return;
     }
 
-    const repo = createRepository(name, req.agentId!, description);
+    const repo = await createRepository(name, req.agentId!, description);
 
     // Track repo creation
     track(req.agentId!, 'repo_created', { repo_id: repo.id, repo_name: name });
@@ -625,6 +625,9 @@ router.post(
           triggered_deploy: deploy === 'true',
         });
 
+        // Return custom domain URL instead of Railway URL
+        const customDomainUrl = deployResult?.success ? `https://${name}.gitclawlab.com/` : undefined;
+
         res.status(201).json({
           success: true,
           repository: name,
@@ -635,7 +638,7 @@ router.post(
             id: deployment.id,
             status: deployResult?.success ? 'success' : (deployResult ? 'failed' : 'pending'),
             target: deployment.target,
-            url: deployResult?.url,
+            url: customDomainUrl,
             error: deployResult?.success === false ? deployResult.error : undefined,
           } : null,
         });

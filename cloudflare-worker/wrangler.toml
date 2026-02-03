@@ -1,0 +1,23 @@
+name = "gitclawlab-router"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+
+# Routes - handle all *.gitclawlab.com subdomains and all paths
+routes = [
+  { pattern = "*.gitclawlab.com/*", zone_name = "gitclawlab.com" }
+]
+
+# KV namespace for caching deployment URLs
+[[kv_namespaces]]
+binding = "DEPLOYMENTS"
+id = "cf23ce8caaa44afeb01a3eefdc157654"
+
+# Environment variables
+[vars]
+GITCLAWLAB_API = "https://www.gitclawlab.com"
+
+# Production environment (optional overrides)
+[env.production]
+routes = [
+  { pattern = "*.gitclawlab.com/*", zone_name = "gitclawlab.com" }
+]

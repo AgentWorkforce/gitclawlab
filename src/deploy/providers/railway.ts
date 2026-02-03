@@ -224,27 +224,15 @@ export async function deployToRailway(options: DeployOptions): Promise<DeployRes
 
     let railwayUrl = deployedUrl;
 
-    // If no URL in output, try to get the domain
-    if (!railwayUrl) {
-      try {
-        const domainArgs = ['domain', '--service', appName];
-        if (projectId) {
-          domainArgs.push('--project', projectId);
-        }
-        if (envId) {
-          domainArgs.push('--environment', envId);
-        }
-        const { stdout: domainOutput } = await execa('railway', domainArgs, {
-          cwd: repoPath,
-          timeout: 10000,
-          env: deployEnv,
-        });
-        const domain = domainOutput.trim();
+    // If no URL in output, try to create/get domain via API
+    if (!railwayUrl && envId) {
+      logs.push('No URL in deployment output, creating service domain via API...');
+      const serviceId = await getServiceId(projectId, appName, logs);
+      if (serviceId) {
+        const domain = await createServiceDomain(serviceId, envId, logs);
         if (domain) {
-          railwayUrl = domain.startsWith('http') ? domain : `https://${domain}`;
+          railwayUrl = `https://${domain}`;
         }
-      } catch {
-        // Ignore domain fetch errors
       }
     }
 
@@ -325,7 +313,128 @@ export async function deleteRailwayProject(repoPath: string): Promise<boolean> {
 export const GITCLAWLAB_BASE_DOMAIN = process.env.GITCLAWLAB_BASE_DOMAIN || 'gitclawlab.com';
 
 /**
- * Add a custom domain to a Railway service
+ * Create a Railway service domain (*.up.railway.app) via API
+ */
+async function createServiceDomain(
+  serviceId: string,
+  environmentId: string,
+  logs: string[]
+): Promise<string | null> {
+  const token = process.env.RAILWAY_API_TOKEN || process.env.RAILWAY_TOKEN;
+  if (!token) {
+    logs.push('No Railway token for domain creation');
+    return null;
+  }
+
+  try {
+    const response = await fetch(RAILWAY_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        query: `
+          mutation ServiceDomainCreate($input: ServiceDomainCreateInput!) {
+            serviceDomainCreate(input: $input) {
+              id
+              domain
+            }
+          }
+        `,
+        variables: {
+          input: {
+            serviceId,
+            environmentId,
+          },
+        },
+      }),
+    });
+
+    const data = await response.json() as any;
+
+    if (data.errors) {
+      const errorMsg = data.errors[0]?.message || 'Unknown API error';
+      // Domain might already exist
+      if (errorMsg.includes('already exists') || errorMsg.includes('duplicate')) {
+        logs.push('Service domain already exists');
+        return null;
+      }
+      logs.push(`Service domain creation error: ${errorMsg}`);
+      return null;
+    }
+
+    const domain = data.data?.serviceDomainCreate?.domain;
+    if (domain) {
+      logs.push(`Created Railway domain: ${domain}`);
+      return domain;
+    }
+    return null;
+  } catch (error) {
+    logs.push(`Failed to create service domain: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    return null;
+  }
+}
+
+/**
+ * Get service ID by name from Railway API
+ */
+async function getServiceId(
+  projectId: string,
+  serviceName: string,
+  logs: string[]
+): Promise<string | null> {
+  const token = process.env.RAILWAY_API_TOKEN || process.env.RAILWAY_TOKEN;
+  if (!token) {
+    logs.push('No Railway token for service lookup');
+    return null;
+  }
+
+  try {
+    const response = await fetch(RAILWAY_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        query: `
+          query GetProject($projectId: String!) {
+            project(id: $projectId) {
+              services {
+                edges {
+                  node {
+                    id
+                    name
+                  }
+                }
+              }
+            }
+          }
+        `,
+        variables: { projectId },
+      }),
+    });
+
+    const data = await response.json() as any;
+    const services = data.data?.project?.services?.edges || [];
+    const service = services.find((s: any) => s.node.name === serviceName);
+
+    if (service) {
+      logs.push(`Found service ID: ${service.node.id}`);
+      return service.node.id;
+    }
+
+    logs.push(`Service not found: ${serviceName}`);
+    return null;
+  } catch (error) {
+    logs.push(`Failed to get service ID: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    return null;
+  }
+}
+
+/**
+ * Add a custom domain to a Railway service via API
  */
 export async function addCustomDomain(
   domain: string,
@@ -335,16 +444,64 @@ export async function addCustomDomain(
 ): Promise<{ success: boolean; error?: string }> {
   logs.push(`Adding custom domain: ${domain}`);
 
-  try {
-    // railway domain only accepts --service flag, not --project or --environment
-    const args = ['domain', '--service', serviceName || 'default', domain];
+  const token = process.env.RAILWAY_API_TOKEN || process.env.RAILWAY_TOKEN;
+  if (!token) {
+    return { success: false, error: 'No Railway token available' };
+  }
 
-    const { stdout } = await execa('railway', args, {
-      cwd: repoPath,
-      timeout: 30000,
-      env: { ...process.env, CI: 'true' },
+  const projectId = process.env.RAILWAY_PROJECT_ID;
+  if (!projectId || !serviceName) {
+    return { success: false, error: 'Missing project ID or service name' };
+  }
+
+  // Get service ID first
+  const serviceId = await getServiceId(projectId, serviceName, logs);
+  if (!serviceId) {
+    return { success: false, error: 'Could not find service ID' };
+  }
+
+  const environmentId = process.env.RAILWAY_ENVIRONMENT_ID;
+
+  try {
+    const response = await fetch(RAILWAY_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        query: `
+          mutation CustomDomainCreate($input: CustomDomainCreateInput!) {
+            customDomainCreate(input: $input) {
+              id
+              domain
+            }
+          }
+        `,
+        variables: {
+          input: {
+            domain,
+            serviceId,
+            environmentId,
+          },
+        },
+      }),
     });
-    logs.push(`Custom domain added: ${stdout.trim() || domain}`);
+
+    const data = await response.json() as any;
+
+    if (data.errors) {
+      const errorMsg = data.errors[0]?.message || 'Unknown API error';
+      logs.push(`Domain API error: ${errorMsg}`);
+      // Domain might already exist
+      if (errorMsg.includes('already exists') || errorMsg.includes('duplicate')) {
+        logs.push('Domain already configured, continuing...');
+        return { success: true };
+      }
+      return { success: false, error: errorMsg };
+    }
+
+    logs.push(`Custom domain added via API: ${domain}`);
     return { success: true };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -363,4 +520,210 @@ export function generateSubdomain(appName: string, baseDomain: string = GITCLAWL
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '');
   return `${sanitized}.${baseDomain}`;
+}
+
+/**
+ * Railway deployment status from API
+ */
+export interface RailwayDeploymentStatus {
+  id: string;
+  status: 'BUILDING' | 'DEPLOYING' | 'SUCCESS' | 'FAILED' | 'CRASHED' | 'REMOVED' | 'INITIALIZING' | 'WAITING' | 'QUEUED';
+  url?: string;
+}
+
+/**
+ * Get the latest deployment for a service from Railway API
+ */
+export async function getLatestRailwayDeployment(
+  serviceId: string,
+  environmentId: string
+): Promise<RailwayDeploymentStatus | null> {
+  const token = process.env.RAILWAY_API_TOKEN || process.env.RAILWAY_TOKEN;
+  if (!token) return null;
+
+  try {
+    const response = await fetch(RAILWAY_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        query: `
+          query GetDeployments($serviceId: String!, $environmentId: String!) {
+            deployments(
+              first: 1
+              input: { serviceId: $serviceId, environmentId: $environmentId }
+            ) {
+              edges {
+                node {
+                  id
+                  status
+                  staticUrl
+                }
+              }
+            }
+          }
+        `,
+        variables: { serviceId, environmentId },
+      }),
+    });
+
+    const data = await response.json() as any;
+    const deployment = data.data?.deployments?.edges?.[0]?.node;
+
+    if (!deployment) return null;
+
+    return {
+      id: deployment.id,
+      status: deployment.status,
+      url: deployment.staticUrl,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch build logs for a Railway deployment
+ */
+export async function getRailwayBuildLogs(deploymentId: string): Promise<string | null> {
+  const token = process.env.RAILWAY_API_TOKEN || process.env.RAILWAY_TOKEN;
+  if (!token) return null;
+
+  try {
+    const response = await fetch(RAILWAY_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        query: `
+          query GetBuildLogs($deploymentId: String!) {
+            buildLogs(deploymentId: $deploymentId, limit: 500) {
+              message
+              timestamp
+            }
+          }
+        `,
+        variables: { deploymentId },
+      }),
+    });
+
+    const data = await response.json() as any;
+    const logs = data.data?.buildLogs;
+
+    if (!logs || !Array.isArray(logs)) return null;
+
+    return logs
+      .map((log: { message: string; timestamp: string }) => log.message)
+      .join('\n');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Poll Railway deployment status until complete or timeout
+ * Returns final status with build logs if failed
+ */
+export async function pollRailwayDeployment(
+  projectId: string,
+  serviceName: string,
+  options: {
+    maxWaitMs?: number;
+    pollIntervalMs?: number;
+    onStatusChange?: (status: string, logs: string[]) => void;
+  } = {}
+): Promise<{
+  success: boolean;
+  status: string;
+  url?: string;
+  buildLogs?: string;
+}> {
+  const {
+    maxWaitMs = 10 * 60 * 1000, // 10 minutes
+    pollIntervalMs = 10000, // 10 seconds
+    onStatusChange,
+  } = options;
+
+  const logs: string[] = [];
+  const log = (msg: string) => {
+    logs.push(msg);
+    onStatusChange?.(msg, logs);
+  };
+
+  const environmentId = process.env.RAILWAY_ENVIRONMENT_ID;
+  if (!environmentId) {
+    return { success: false, status: 'ERROR', buildLogs: 'RAILWAY_ENVIRONMENT_ID not set' };
+  }
+
+  // Get service ID
+  const serviceId = await getServiceId(projectId, serviceName, logs);
+  if (!serviceId) {
+    return { success: false, status: 'ERROR', buildLogs: `Service not found: ${serviceName}` };
+  }
+
+  log(`Polling deployment status for service: ${serviceName}`);
+
+  const startTime = Date.now();
+  let lastStatus = '';
+  let deploymentId = '';
+
+  while (Date.now() - startTime < maxWaitMs) {
+    const deployment = await getLatestRailwayDeployment(serviceId, environmentId);
+
+    if (!deployment) {
+      log('Waiting for deployment to start...');
+      await sleep(pollIntervalMs);
+      continue;
+    }
+
+    deploymentId = deployment.id;
+
+    if (deployment.status !== lastStatus) {
+      log(`Deployment status: ${deployment.status}`);
+      lastStatus = deployment.status;
+    }
+
+    // Terminal states
+    if (deployment.status === 'SUCCESS') {
+      log('Deployment succeeded!');
+      return {
+        success: true,
+        status: 'SUCCESS',
+        url: deployment.url ? `https://${deployment.url}` : undefined,
+      };
+    }
+
+    if (['FAILED', 'CRASHED', 'REMOVED'].includes(deployment.status)) {
+      log(`Deployment failed with status: ${deployment.status}`);
+
+      // Fetch build logs for failed deployments
+      const buildLogs = await getRailwayBuildLogs(deploymentId);
+
+      return {
+        success: false,
+        status: deployment.status,
+        buildLogs: buildLogs || `Deployment ${deployment.status.toLowerCase()} - no logs available`,
+      };
+    }
+
+    await sleep(pollIntervalMs);
+  }
+
+  // Timeout - try to get whatever logs we have
+  log('Deployment timed out');
+  const buildLogs = deploymentId ? await getRailwayBuildLogs(deploymentId) : null;
+
+  return {
+    success: false,
+    status: 'TIMEOUT',
+    buildLogs: buildLogs || 'Deployment timed out waiting for completion',
+  };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }

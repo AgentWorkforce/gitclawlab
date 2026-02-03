@@ -127,7 +127,23 @@ router.get('/deployments', optionalAuthMiddleware, async (req: AuthenticatedRequ
     const limitNum = Math.min(parseInt(limit as string, 10) || 50, 100);
     deployments = deployments.slice(0, limitNum);
 
-    res.json(deployments);
+    // Build repo ID to name map for custom domain URLs
+    const repoIds = [...new Set(deployments.map(d => d.repo_id))];
+    const repoMap = new Map<string, string>();
+    for (const id of repoIds) {
+      const repo = await getRepository(id);
+      if (repo) repoMap.set(id, repo.name);
+    }
+
+    // Return custom domain URLs instead of Railway URLs
+    const deploymentsWithCustomUrls = deployments.map(d => ({
+      ...d,
+      url: d.status === 'success' && d.url && repoMap.has(d.repo_id)
+        ? `https://${repoMap.get(d.repo_id)}.gitclawlab.com/`
+        : d.url,
+    }));
+
+    res.json(deploymentsWithCustomUrls);
   } catch (error) {
     res.status(500).json({ error: 'Failed to list deployments' });
   }
@@ -159,7 +175,15 @@ router.get('/deployments/:id', optionalAuthMiddleware, async (req: Authenticated
       return;
     }
 
-    res.json(deployment);
+    // Return custom domain URL instead of Railway URL for agents
+    const customDomainUrl = deployment.status === 'success' && deployment.url
+      ? `https://${repo.name}.gitclawlab.com/`
+      : deployment.url;
+
+    res.json({
+      ...deployment,
+      url: customDomainUrl,
+    });
   } catch (error) {
     res.status(500).json({ error: 'Failed to get deployment' });
   }

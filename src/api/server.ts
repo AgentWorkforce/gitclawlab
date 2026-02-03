@@ -7,6 +7,38 @@ import deployRouter from './routes/deploy.js';
 import webhooksRouter from './routes/webhooks.js';
 import agentsRouter from './routes/agents.js';
 import stripeRouter from './routes/stripe.js';
+import { getRepository, getLatestSuccessfulDeployment } from '../db/schema.js';
+
+// In-memory cache for deployment URLs (5 minute TTL)
+const deploymentUrlCache = new Map<string, { url: string; expires: number }>();
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+async function getDeploymentUrl(appName: string): Promise<string | null> {
+  // Check cache first
+  const cached = deploymentUrlCache.get(appName);
+  if (cached && cached.expires > Date.now()) {
+    return cached.url;
+  }
+
+  // Look up from database
+  const repo = await getRepository(appName);
+  if (!repo) return null;
+
+  const deployment = await getLatestSuccessfulDeployment(repo.id);
+  if (!deployment?.url) return null;
+
+  // Cache the result
+  deploymentUrlCache.set(appName, {
+    url: deployment.url,
+    expires: Date.now() + CACHE_TTL,
+  });
+
+  return deployment.url;
+}
+
+// Subdomains that should NOT be proxied (handled by main app)
+const MAIN_SUBDOMAINS = ['www', 'api', 'git', 'ssh', ''];
+const BASE_DOMAIN = process.env.BASE_DOMAIN || 'gitclawlab.com';
 
 // Simple in-memory rate limiter
 const rateLimitStore = new Map<string, { count: number; resetTime: number }>();
@@ -60,6 +92,86 @@ const projectRoot = join(__dirname, '..', '..');
  */
 export function createServer(): Express {
   const app = express();
+
+  /**
+   * Subdomain proxy middleware - routes *.gitclawlab.com to Railway deployments
+   * This runs FIRST before any other middleware
+   */
+  app.use(async (req: Request, res: Response, next: NextFunction) => {
+    const host = req.hostname || req.headers.host?.split(':')[0] || '';
+
+    // Extract subdomain
+    const parts = host.split('.');
+    if (parts.length < 2) {
+      next();
+      return;
+    }
+
+    // Check if this is a subdomain we should proxy
+    const subdomain = parts[0];
+    const isSubdomain = host.endsWith(BASE_DOMAIN) && !MAIN_SUBDOMAINS.includes(subdomain);
+
+    if (!isSubdomain) {
+      next();
+      return;
+    }
+
+    // Look up the Railway URL for this app
+    try {
+      const railwayUrl = await getDeploymentUrl(subdomain);
+
+      if (!railwayUrl) {
+        res.status(404).send(`App "${subdomain}" not found or not deployed`);
+        return;
+      }
+
+      // Proxy the request to Railway
+      const targetUrl = new URL(req.originalUrl, railwayUrl);
+
+      const proxyResponse = await fetch(targetUrl.toString(), {
+        method: req.method,
+        headers: {
+          ...Object.fromEntries(
+            Object.entries(req.headers)
+              .filter(([key]) => !['host', 'connection'].includes(key.toLowerCase()))
+              .map(([key, value]) => [key, Array.isArray(value) ? value.join(', ') : value || ''])
+          ),
+          'Host': new URL(railwayUrl).host,
+          'X-Forwarded-Host': host,
+          'X-Forwarded-Proto': 'https',
+        },
+        body: ['GET', 'HEAD'].includes(req.method) ? undefined : req.body,
+      });
+
+      // Forward response headers
+      proxyResponse.headers.forEach((value, key) => {
+        if (!['transfer-encoding', 'connection'].includes(key.toLowerCase())) {
+          res.setHeader(key, value);
+        }
+      });
+
+      res.status(proxyResponse.status);
+
+      // Stream the response body
+      if (proxyResponse.body) {
+        const reader = proxyResponse.body.getReader();
+        const pump = async () => {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            res.write(value);
+          }
+          res.end();
+        };
+        await pump();
+      } else {
+        res.end();
+      }
+    } catch (error) {
+      console.error('Proxy error:', error);
+      res.status(502).send('Bad Gateway');
+    }
+  });
 
   // IMPORTANT: Stripe webhook needs raw body for signature verification
   // This must be registered BEFORE express.json() middleware
@@ -177,6 +289,33 @@ export function createServer(): Express {
         health: '/health',
       },
     });
+  });
+
+  /**
+   * GET /api/lookup/:name - Get Railway URL for an app (used by Cloudflare Worker)
+   * This is an internal endpoint for subdomain routing.
+   */
+  app.get('/api/lookup/:name', async (req: Request, res: Response) => {
+    const { name } = req.params;
+
+    try {
+      const repo = await getRepository(name);
+      if (!repo) {
+        res.status(404).json({ error: 'App not found' });
+        return;
+      }
+
+      const deployment = await getLatestSuccessfulDeployment(repo.id);
+      if (!deployment || !deployment.url) {
+        res.status(404).json({ error: 'No successful deployment found' });
+        return;
+      }
+
+      res.json({ url: deployment.url, repo: name });
+    } catch (error) {
+      console.error('Lookup error:', error);
+      res.status(500).json({ error: 'Lookup failed' });
+    }
   });
 
   // Mount routes
