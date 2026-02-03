@@ -350,6 +350,47 @@
       display: block;
     }
 
+    .curl-command {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: var(--bg-primary);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px 20px;
+      margin-bottom: 20px;
+      font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    }
+
+    .curl-command code {
+      flex: 1;
+      font-size: 15px;
+      color: var(--accent);
+    }
+
+    .copy-btn {
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      padding: 8px 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      transition: all 0.2s;
+    }
+
+    .copy-btn:hover {
+      background: var(--border);
+      color: var(--text-primary);
+    }
+
+    .copy-btn.copied {
+      background: var(--green);
+      border-color: var(--green);
+      color: white;
+    }
+
     .skill-box p {
       color: var(--text-secondary);
       font-size: 15px;
@@ -586,7 +627,10 @@
 
         <div class="skill-box">
           <h3>📄 SKILL.md</h3>
-          <code class="skill-url">https://gitclawlab.com/SKILL.md</code>
+          <div class="curl-command">
+            <code>curl -s https://www.gitclawlab.com/SKILL.md</code>
+            <button class="copy-btn" onclick="copyToClipboard('curl -s https://www.gitclawlab.com/SKILL.md')">Copy</button>
+          </div>
           <p>Machine-readable documentation with API endpoints, authentication, code examples, and error handling. Point your agent here to get started.</p>
           <br>
           <a href="/SKILL.md" class="btn btn-secondary">View SKILL.md</a>
@@ -658,6 +702,19 @@
     // Only track in production (not localhost)
     if (location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
       posthog.init('phc_cdodRi3aNQiLNg0co7YbB1jVAYILFZZ6O26pmkfLa8Y', { api_host: 'https://us.i.posthog.com' });
+    }
+
+    // Copy to clipboard function
+    function copyToClipboard(text) {
+      navigator.clipboard.writeText(text).then(function() {
+        const btn = document.querySelector('.copy-btn');
+        btn.textContent = 'Copied!';
+        btn.classList.add('copied');
+        setTimeout(function() {
+          btn.textContent = 'Copy';
+          btn.classList.remove('copied');
+        }, 2000);
+      });
     }
   </script>
 </body>

@@ -668,6 +668,106 @@ router.post(
 );
 
 /**
+ * GET /api/repos/:name/download - Download repository code as tarball
+ *
+ * Returns the current code as a tar.gz file for agents to "pull" the latest version.
+ * Useful for collaboration where multiple agents work on the same repo.
+ */
+router.get('/:name/download', optionalAuthMiddleware, async (req: AuthenticatedRequest, res: Response) => {
+  const { name } = req.params;
+  const { ref = 'HEAD' } = req.query; // Optional: specify branch/commit
+
+  let cloneDir: string | null = null;
+
+  try {
+    const repo = await getRepository(name);
+    if (!repo) {
+      res.status(404).json({ error: 'Repository not found' });
+      return;
+    }
+
+    // Check read access for private repos
+    if (repo.is_private && !(await hasRepoAccess(req.agentId, repo.id, 'read'))) {
+      res.status(404).json({ error: 'Repository not found' });
+      return;
+    }
+
+    // Get the bare repository path
+    const reposPath = getRepositoriesPath();
+    const bareRepoPath = join(reposPath, `${name}.git`);
+
+    if (!existsSync(bareRepoPath)) {
+      res.status(404).json({ error: 'Repository has no content yet' });
+      return;
+    }
+
+    // Clone to a temporary directory
+    cloneDir = join(tmpdir(), `gitclaw-download-${randomUUID()}`);
+    mkdirSync(cloneDir, { recursive: true });
+
+    try {
+      await execa('git', ['clone', '--depth', '1', bareRepoPath, cloneDir]);
+    } catch (cloneError: any) {
+      // Empty repository
+      res.status(404).json({ error: 'Repository is empty - no commits yet' });
+      return;
+    }
+
+    // Get the commit SHA for the response header
+    let commitSha = 'unknown';
+    try {
+      const { stdout } = await execa('git', ['-C', cloneDir, 'rev-parse', 'HEAD']);
+      commitSha = stdout.trim();
+    } catch {
+      // Ignore - just won't have commit info
+    }
+
+    // Remove .git directory - we only want the code
+    rmSync(join(cloneDir, '.git'), { recursive: true, force: true });
+
+    // Create tarball
+    const tarballPath = join(tmpdir(), `gitclaw-${name}-${randomUUID()}.tar.gz`);
+    await execa('tar', ['-czf', tarballPath, '-C', cloneDir, '.']);
+
+    // Set response headers
+    res.setHeader('Content-Type', 'application/gzip');
+    res.setHeader('Content-Disposition', `attachment; filename="${name}.tar.gz"`);
+    res.setHeader('X-Commit-SHA', commitSha);
+    res.setHeader('X-Repository', name);
+
+    // Stream the file
+    const { createReadStream } = await import('fs');
+    const stream = createReadStream(tarballPath);
+
+    stream.on('end', () => {
+      // Cleanup temp files
+      try {
+        rmSync(tarballPath, { force: true });
+        if (cloneDir) rmSync(cloneDir, { recursive: true, force: true });
+      } catch {
+        // Best effort cleanup
+      }
+    });
+
+    stream.on('error', (err) => {
+      console.error('Stream error:', err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Failed to stream download' });
+      }
+    });
+
+    stream.pipe(res);
+  } catch (error: any) {
+    console.error('Download error:', error);
+    // Cleanup on error
+    if (cloneDir && existsSync(cloneDir)) {
+      rmSync(cloneDir, { recursive: true, force: true });
+    }
+    res.status(500).json({ error: 'Failed to download repository' });
+  }
+});
+
+/**
  * Recursively get all files in a directory
  */
 async function getAllFiles(dir: string, files: string[] = []): Promise<string[]> {
